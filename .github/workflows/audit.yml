@@ -37,12 +37,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout caller (full history, all branches)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
       - name: Checkout guard
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: kodflow/commit-guard-action
           ref: ${{ inputs.guard_ref || 'main' }}

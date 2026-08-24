@@ -42,13 +42,13 @@ jobs:
       # the synthetic merge commit, so `git log base..head` lists exactly the
       # commits the PR proposes and nothing from the base branch.
       - name: Checkout caller
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
           ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
 
       - name: Checkout guard
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: kodflow/commit-guard-action
           ref: ${{ inputs.guard_ref }}
