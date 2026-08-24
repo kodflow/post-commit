@@ -1,5 +1,5 @@
-# Self-test: the guard's own logic must be verified here, or a bad pattern
-# silently propagates to every repo in the fleet on the next run.
+# Self-test. A bad pattern here is live in every repo on the next run, so
+# the gate's own logic is verified before it can propagate.
 name: ci
 
 on:
@@ -19,18 +19,21 @@ jobs:
       - name: shellcheck
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
-          shellcheck -S warning scripts/ci-guard.sh tests/run.sh
-      - name: Guard behaviour tests
+          shellcheck -S warning scripts/*.sh tests/run.sh
+      - name: behaviour tests
         run: bash tests/run.sh
-      - name: Validate workflow YAML
+      - name: validate YAML
         run: |
           python3 - <<'PY'
-          import yaml, glob, sys
-          for f in sorted(glob.glob('.github/workflows/*.yml')) + ['stub/post-commit.yml']:
-              yaml.safe_load(open(f))
-              print(f"ok {f}")
+          import yaml, glob
+          for f in ['action.yml', 'stub/post-commit.yml'] + sorted(glob.glob('.github/workflows/*.yml')):
+              yaml.safe_load(open(f)); print('ok', f)
           PY
 
-  # Dogfood: this repo runs its own guard on its own PRs.
-  guard:
-    uses: ./.github/workflows/commit-guard.yml
+  # Dogfood: this repo is gated by the exact version of the action under review.
+  post-commit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./
