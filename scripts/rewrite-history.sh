@@ -84,6 +84,10 @@ ATTR = re.compile(
     rb'|^\s*plan:\s')
 ROBOT = '🤖'.encode()
 lines = message.split(b'\n')
+# Strict no-op on a clean message: whitespace normalisation alone must not
+# rewrite a commit, or every untainted commit gets a new SHA for nothing.
+if not any(ATTR.search(l) or ROBOT in l for l in lines):
+    return message
 subject = lines[0].replace(ROBOT, b'')
 subject = re.sub(rb'(?i)\s*[\(\[]?\bai[-\s]?assisted[\)\]]?', b'', subject).rstrip()
 body = [l for l in lines[1:] if not (ATTR.search(l) or ROBOT in l)]
