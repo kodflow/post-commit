@@ -74,6 +74,10 @@ ruleset_payload() {
 ensure_stub() {   # -> sets STUB_STATE, PR_URL
     local repo="$1" db="$2" sha out
     PR_URL=""
+    # This repository gates itself through ci.yml (`uses: ./`, job named
+    # post-commit) so the version under review is the one that runs; a stub
+    # pinned to @main would test the wrong code. The ruleset still applies.
+    if [ "$repo" = "kodflow/post-commit" ]; then STUB_STATE="self"; return; fi
     if gh api "repos/$repo/contents/$STUB_PATH?ref=$db" --jq .sha >/dev/null 2>&1; then
         STUB_STATE="present"; return
     fi
