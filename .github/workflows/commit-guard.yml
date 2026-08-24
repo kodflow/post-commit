@@ -1,0 +1,93 @@
+# Reusable commit guard — the single central definition for the whole fleet.
+#
+# Repos call this via a 3-line stub (stub/post-commit.yml). Fixing a bug or
+# adding a rule here propagates to every caller pinned to @main on their next
+# run, with no per-repo change.
+name: commit-guard
+
+on:
+  workflow_call:
+    inputs:
+      strict:
+        description: >-
+          Also apply patterns-strict.txt (bare vendor keywords, .claude/ path
+          leaks, Plan: footers). Off by default: it false-positives on repos
+          whose subject matter is the tooling itself.
+        type: boolean
+        default: false
+        required: false
+      secrets_scan:
+        description: Scan added lines of the diff for credential shapes.
+        type: boolean
+        default: true
+        required: false
+      guard_ref:
+        description: >-
+          Ref of kodflow/commit-guard-action to load the logic from. Defaults
+          to main so fixes propagate automatically; pin to a tag to freeze.
+        type: string
+        default: main
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    steps:
+      # The caller's repo. fetch-depth: 0 is required — the guard diffs a
+      # commit RANGE, and a shallow clone has no merge base to diff against.
+      # For pull_request events we check out the real head commit rather than
+      # the synthetic merge commit, so `git log base..head` lists exactly the
+      # commits the PR proposes and nothing from the base branch.
+      - name: Checkout caller
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+
+      - name: Checkout guard
+        uses: actions/checkout@v4
+        with:
+          repository: kodflow/commit-guard-action
+          ref: ${{ inputs.guard_ref }}
+          path: .commit-guard
+
+      - name: Resolve commit range
+        id: range
+        env:
+          EVENT: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          PUSH_AFTER: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" = "pull_request" ] || [ "$EVENT" = "pull_request_target" ]; then
+            # base..head lists commits reachable from head but not base —
+            # exactly the PR's own commits, even when the branch is behind.
+            RANGE="${PR_BASE}..${PR_HEAD}"
+          else
+            # On a push, github.event.before is all-zeros for a newly created
+            # branch, and points at an orphaned commit after a force-push. In
+            # both cases it is not a resolvable object, so fall back to the
+            # tip commit alone rather than failing the job on a bad range.
+            if [ -n "${PUSH_BEFORE:-}" ] \
+               && [ "$PUSH_BEFORE" != "0000000000000000000000000000000000000000" ] \
+               && git cat-file -e "${PUSH_BEFORE}^{commit}" 2>/dev/null; then
+              RANGE="${PUSH_BEFORE}..${PUSH_AFTER}"
+            else
+              echo "::notice::no resolvable 'before' commit (new branch or force-push) — scanning the tip commit only"
+              RANGE="${PUSH_AFTER}~1..${PUSH_AFTER}"
+              git cat-file -e "${PUSH_AFTER}~1^{commit}" 2>/dev/null || RANGE="${PUSH_AFTER}"
+            fi
+          fi
+          echo "range=$RANGE" >> "$GITHUB_OUTPUT"
+          echo "Scanning range: $RANGE"
+
+      - name: Run commit guard
+        env:
+          GUARD_STRICT: ${{ inputs.strict }}
+          GUARD_SECRETS: ${{ inputs.secrets_scan }}
+        run: bash .commit-guard/scripts/ci-guard.sh "${{ steps.range.outputs.range }}"
