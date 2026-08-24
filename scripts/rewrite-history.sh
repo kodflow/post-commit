@@ -55,7 +55,11 @@ echo "▸ $REPO — mirror clone into $MIRROR"
 git clone --mirror -q "https://github.com/$REPO.git" "$MIRROR" || exit 1
 
 BEFORE_COUNT="$(git -C "$MIRROR" rev-list --all --count)"
-BEFORE_TAINT="$(cd "$MIRROR" && GITHUB_STEP_SUMMARY=/dev/null PC_MAX_REPORT=0 bash "$SCRIPT_DIR/post-commit.sh" --all 2>&1 | grep -oE '^::error::[0-9]+ tainted' | grep -oE '[0-9]+' || echo 0)"
+# The gate exits 1 on a tainted history — expected here — and `pipefail`
+# would turn that into a pipeline failure, so capture first, parse after.
+BEFORE_OUT="$(cd "$MIRROR" && GITHUB_STEP_SUMMARY=/dev/null PC_MAX_REPORT=0 bash "$SCRIPT_DIR/post-commit.sh" --all 2>&1 || true)"
+BEFORE_TAINT="$(printf '%s' "$BEFORE_OUT" | grep -oE '^::error::[0-9]+ tainted' | grep -oE '[0-9]+' || true)"
+: "${BEFORE_TAINT:=0}"
 
 # --- identities: every author/committer that looks like an AI agent --------
 AI_ID='claude|anthropic|copilot|openai|chatgpt|gemini|devin|aider|cursor|codeium|\bai\b|\bllm\b'
@@ -95,10 +99,12 @@ PY
 
 echo "▸ rewriting messages and identities ($ID_COUNT AI identit$([ "$ID_COUNT" = 1 ] && echo y || echo ies) → $IDENTITY)"
 ( cd "$MIRROR" && git filter-repo --quiet --force --mailmap "$MAILMAP" \
-      --message-callback "$(cat "$CALLBACK")" ) || { echo "filter-repo failed" >&2; exit 1; }
+      --message-callback "$(cat "$CALLBACK")" ) >"$WORK/filter-repo.log" 2>&1 \
+    || { echo "filter-repo failed:" >&2; cat "$WORK/filter-repo.log" >&2; exit 1; }
 
 AFTER_COUNT="$(git -C "$MIRROR" rev-list --all --count)"
-CHANGED="$(awk '$1!=$2' "$MIRROR/filter-repo/commit-map" 2>/dev/null | wc -l | tr -d ' ')"
+# commit-map has a header line ("old new"); skip it.
+CHANGED="$(awk 'NR>1 && $1!=$2' "$MIRROR/filter-repo/commit-map" 2>/dev/null | wc -l | tr -d ' ')"
 
 # --- verify with the gate itself --------------------------------------------
 GATE_OUT="$(cd "$MIRROR" && GITHUB_STEP_SUMMARY=/dev/null PC_MAX_REPORT=20 bash "$SCRIPT_DIR/post-commit.sh" --all 2>&1)"
@@ -126,7 +132,7 @@ if [ -n "$RESIDUAL_KW" ]; then
     printf '%s\n' "$RESIDUAL_KW" | sed 's/^/      /'
 fi
 if [ -n "$OPEN_PRS" ]; then
-    echo "  open PRs that will need a rebase after the push:"
+    echo "  open PRs (same-repo branches are rewritten and pushed along with main; fork-based ones break):"
     printf '%s\n' "$OPEN_PRS" | sed 's/^/      /'
 fi
 echo ""
