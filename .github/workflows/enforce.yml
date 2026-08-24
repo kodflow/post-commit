@@ -1,0 +1,36 @@
+# Fleet enforcement from GitHub itself. Needs a FLEET_TOKEN secret: a PAT with
+# `repo` + `workflow` scopes belonging to an admin of every target — the
+# default GITHUB_TOKEN cannot touch other repositories.
+name: enforce
+
+on:
+  workflow_dispatch:
+    inputs:
+      targets:
+        description: "'--all' or space-separated owner/repo list"
+        default: '--all'
+      apply:
+        description: Apply changes (otherwise dry-run)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  enforce:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: enforce
+        env:
+          GH_TOKEN: ${{ secrets.FLEET_TOKEN }}
+          TARGETS: ${{ inputs.targets }}
+          APPLY: ${{ inputs.apply }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::FLEET_TOKEN secret is not set (PAT with repo + workflow scopes, admin on targets)"
+            exit 1
+          fi
+          # shellcheck disable=SC2086 — TARGETS is a deliberate word list
+          bash scripts/enforce.sh $([ "$APPLY" = "true" ] && echo --apply) --report "$GITHUB_STEP_SUMMARY" $TARGETS

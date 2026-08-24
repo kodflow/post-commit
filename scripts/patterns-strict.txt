@@ -1,13 +1,12 @@
-# Opt-in extra patterns (workflow input: strict: true).
+# Opt-in extra patterns (action input: strict: true).
 #
-# Two classes that are deliberately NOT default:
-#   1. Bare vendor keywords — high false-positive rate on repos whose
-#      subject matter is the tooling itself.
-#   2. Workflow-internal leaks — paths and footers that reveal an
-#      agent-driven workflow rather than an AI author (ktn-linter #364).
-#      Repos that legitimately version a .claude/ directory would fail on
-#      every commit that touches it.
+# Bare vendor keywords and `.claude/` path references. Deliberately NOT
+# default: on devcontainer-template's own history `.claude/` appears in 25 of
+# the last 60 legitimate commit messages ("fix: update .claude/scripts/…").
+# Enable on repos where a commit message has no legitimate reason to mention
+# the tooling.
 claude[-[:space:]]code
+\bclaude\b
+\banthropic\b
 \.claude/
-^[[:space:]]*plan:[[:space:]]
 (see|ref|tracked-in)[[:space:]]+\.claude

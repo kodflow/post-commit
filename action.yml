@@ -1,0 +1,90 @@
+# kodflow/post-commit — composite action behind the mandatory `post-commit`
+# status. A caller's job named `post-commit` with a single `uses:` step is
+# the whole integration; the check name is therefore exactly "post-commit",
+# which is what the fleet rulesets require.
+name: post-commit
+description: >-
+  Mandatory merge gate: no AI attribution anywhere in history, conventional
+  commit subjects, no credentials added. Logic lives in kodflow/post-commit —
+  callers pin @main so a fix there is live everywhere on the next run.
+branding:
+  icon: shield
+  color: red
+
+inputs:
+  strict:
+    description: Also apply patterns-strict.txt (bare vendor keywords, .claude/ paths).
+    default: 'false'
+  history:
+    description: >-
+      full — scan every commit reachable from the head (default: one tainted
+      commit anywhere blocks until history is rewritten). range — only the
+      commits this push/PR introduces.
+    default: 'full'
+  format:
+    description: Enforce conventional-commit subjects on the range's non-merge commits.
+    default: 'true'
+  secrets:
+    description: Scan the range's added lines for credential shapes.
+    default: 'true'
+  token:
+    description: Token used to check out the calling repository.
+    default: ${{ github.token }}
+
+runs:
+  using: composite
+  steps:
+    # fetch-depth 0 is required: full-history mode walks every ancestor and
+    # range mode needs the merge base. On pull_request we check out the real
+    # head, not GitHub's synthetic merge commit, so `base..head` is exactly
+    # the PR's own commits.
+    - name: Checkout caller (full history)
+      uses: actions/checkout@v7
+      with:
+        fetch-depth: 0
+        ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+        token: ${{ inputs.token }}
+        persist-credentials: false
+
+    - name: Resolve head and range
+      id: rev
+      shell: bash
+      env:
+        EVENT: ${{ github.event_name }}
+        PR_BASE: ${{ github.event.pull_request.base.sha }}
+        PR_HEAD: ${{ github.event.pull_request.head.sha }}
+        PUSH_BEFORE: ${{ github.event.before }}
+        SHA: ${{ github.sha }}
+      run: |
+        set -euo pipefail
+        if [ "$EVENT" = "pull_request" ] || [ "$EVENT" = "pull_request_target" ]; then
+          HEAD="$PR_HEAD"
+          RANGE="${PR_BASE}..${PR_HEAD}"
+        else
+          HEAD="$SHA"
+          # github.event.before is all-zeros for a new branch and points at an
+          # orphaned commit after a force-push; neither resolves, so fall back
+          # to the tip commit instead of failing the job on a bad range.
+          ZERO=0000000000000000000000000000000000000000
+          if [ -n "${PUSH_BEFORE:-}" ] && [ "$PUSH_BEFORE" != "$ZERO" ] \
+             && git cat-file -e "${PUSH_BEFORE}^{commit}" 2>/dev/null; then
+            RANGE="${PUSH_BEFORE}..${SHA}"
+          elif git cat-file -e "${SHA}~1^{commit}" 2>/dev/null; then
+            echo "::notice::no resolvable 'before' commit (new branch or force-push) — range is the tip commit only"
+            RANGE="${SHA}~1..${SHA}"
+          else
+            RANGE=""
+          fi
+        fi
+        echo "head=$HEAD" >> "$GITHUB_OUTPUT"
+        echo "range=$RANGE" >> "$GITHUB_OUTPUT"
+        echo "head=$HEAD range=${RANGE:-<none>}"
+
+    - name: post-commit
+      shell: bash
+      env:
+        PC_STRICT: ${{ inputs.strict }}
+        PC_HISTORY: ${{ inputs.history }}
+        PC_FORMAT: ${{ inputs.format }}
+        PC_SECRETS: ${{ inputs.secrets }}
+      run: bash "${{ github.action_path }}/scripts/post-commit.sh" "${{ steps.rev.outputs.head }}" "${{ steps.rev.outputs.range }}"
