@@ -114,8 +114,10 @@ subjects a human must reword, vendor mentions left in ordinary prose, open
 PRs that will need a rebase. Nothing reaches GitHub.
 
 `--execute` force-pushes every branch and tag of the rewritten mirror. After
-that, every commit SHA from the first tainted one onward is different, every
-open PR must be rebased, every clone must be re-cloned, and there is no undo.
+that, every commit SHA from the first tainted one onward is different (and
+loses its GPG signature — a git-filter-repo limitation), same-repo PR
+branches are rewritten along with the trunk, fork-based PRs break, every
+clone must be re-cloned, and there is no undo.
 GitHub keeps the old commits reachable by URL for a while; only support can
 purge them. Run it one repository at a time, on purpose.
 
