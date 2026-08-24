@@ -54,17 +54,19 @@ MIRROR="$WORK/mirror"
 echo "▸ $REPO — mirror clone into $MIRROR"
 git clone --mirror -q "https://github.com/$REPO.git" "$MIRROR" || exit 1
 
-BEFORE_COUNT="$(git -C "$MIRROR" rev-list --all --count)"
+# --branches, not --all: a mirror also carries GitHub's refs/pull/*, which are
+# never pushed back and would inflate every count with closed-PR commits.
+BEFORE_COUNT="$(git -C "$MIRROR" rev-list --branches --count)"
 # The gate exits 1 on a tainted history — expected here — and `pipefail`
 # would turn that into a pipeline failure, so capture first, parse after.
-BEFORE_OUT="$(cd "$MIRROR" && GITHUB_STEP_SUMMARY=/dev/null PC_MAX_REPORT=0 bash "$SCRIPT_DIR/post-commit.sh" --all 2>&1 || true)"
+BEFORE_OUT="$(cd "$MIRROR" && GITHUB_STEP_SUMMARY=/dev/null PC_MAX_REPORT=0 bash "$SCRIPT_DIR/post-commit.sh" --branches 2>&1 || true)"
 BEFORE_TAINT="$(printf '%s' "$BEFORE_OUT" | grep -oE '^::error::[0-9]+ tainted' | grep -oE '[0-9]+' || true)"
 : "${BEFORE_TAINT:=0}"
 
 # --- identities: every author/committer that looks like an AI agent --------
 AI_ID='claude|anthropic|copilot|openai|chatgpt|gemini|devin|aider|cursor|codeium|\bai\b|\bllm\b'
 MAILMAP="$WORK/mailmap"
-git -C "$MIRROR" log --all --format='%an <%ae>%n%cn <%ce>' | sort -u | grep -iE -- "$AI_ID" \
+git -C "$MIRROR" log --branches --format='%an <%ae>%n%cn <%ce>' | sort -u | grep -iE -- "$AI_ID" \
     | while IFS= read -r id; do printf '%s %s\n' "$IDENTITY" "$id"; done > "$MAILMAP"
 ID_COUNT="$(wc -l < "$MAILMAP" | tr -d ' ')"
 
@@ -102,14 +104,14 @@ echo "▸ rewriting messages and identities ($ID_COUNT AI identit$([ "$ID_COUNT"
       --message-callback "$(cat "$CALLBACK")" ) >"$WORK/filter-repo.log" 2>&1 \
     || { echo "filter-repo failed:" >&2; cat "$WORK/filter-repo.log" >&2; exit 1; }
 
-AFTER_COUNT="$(git -C "$MIRROR" rev-list --all --count)"
+AFTER_COUNT="$(git -C "$MIRROR" rev-list --branches --count)"
 # commit-map has a header line ("old new"); skip it.
 CHANGED="$(awk 'NR>1 && $1!=$2' "$MIRROR/filter-repo/commit-map" 2>/dev/null | wc -l | tr -d ' ')"
 
 # --- verify with the gate itself --------------------------------------------
-GATE_OUT="$(cd "$MIRROR" && GITHUB_STEP_SUMMARY=/dev/null PC_MAX_REPORT=20 bash "$SCRIPT_DIR/post-commit.sh" --all 2>&1)"
+GATE_OUT="$(cd "$MIRROR" && GITHUB_STEP_SUMMARY=/dev/null PC_MAX_REPORT=20 bash "$SCRIPT_DIR/post-commit.sh" --branches 2>&1)"
 GATE_RC=$?
-RESIDUAL_KW="$(git -C "$MIRROR" log --all --format='%h %s%n%b' | grep -iE 'claude|anthropic|copilot|chatgpt|openai|gemini|\bllm\b' | head -20)"
+RESIDUAL_KW="$(git -C "$MIRROR" log --branches --format='%h %s%n%b' | grep -iE 'claude|anthropic|copilot|chatgpt|openai|gemini|\bllm\b' | head -20)"
 OPEN_PRS="$(gh pr list --repo "$REPO" --state open --json number,title --jq '.[] | "#\(.number) \(.title)"' 2>/dev/null)"
 
 echo ""
