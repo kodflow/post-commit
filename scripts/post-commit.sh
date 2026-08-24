@@ -129,12 +129,23 @@ fi
 # rejects outright, so both filters use ERE where `\+` is an unambiguous
 # literal plus.
 SECRET_RE='password[[:space:]]*[=:][[:space:]]*["'"'"'][^"'"'"']{4,}|api[_-]?key[[:space:]]*[=:][[:space:]]*["'"'"'][^"'"'"']{8,}|secret[_-]?key[[:space:]]*[=:][[:space:]]*["'"'"'][^"'"'"']{8,}|BEGIN (RSA|OPENSSH|DSA|EC|PGP) PRIVATE KEY|ghp_[a-zA-Z0-9]{36}|gho_[a-zA-Z0-9]{36}|github_pat_[a-zA-Z0-9_]{22,}|sk-[a-zA-Z0-9]{48}|AKIA[0-9A-Z]{16}|xox[baprs]-[a-zA-Z0-9-]{10,}|AIza[0-9A-Za-z_-]{35}'
+# Test and fixture paths are excluded: their legitimate content includes
+# fake credentials that exercise scanners (this repo's own tests/run.sh
+# tripped the gate on its first dogfood run). Narrow by design — a real
+# secret misplaced under tests/ slips this check; GitGuardian, which runs
+# on these repos, does not have that exclusion.
+SECRET_EXCLUDE=(':(exclude,glob)tests/**' ':(exclude,glob)**/tests/**'
+                ':(exclude,glob)test/**' ':(exclude,glob)**/test/**'
+                ':(exclude,glob)testdata/**' ':(exclude,glob)**/testdata/**'
+                ':(exclude,glob)fixtures/**' ':(exclude,glob)**/fixtures/**'
+                ':(exclude,glob)__tests__/**' ':(exclude,glob)**/__tests__/**'
+                ':(exclude,glob)**/*.bats' ':(exclude,glob)**/*_test.*' ':(exclude,glob)**/*.test.*')
 if [ "$SECRETS" = "true" ] && [ -n "$RANGE" ]; then
     while IFS= read -r hit; do
         [ -z "$hit" ] && continue
         SEC_N=$((SEC_N + 1))
         printf '%s\n' "$hit" >> "$SEC_FILE"
-    done < <(git diff --unified=0 "$RANGE" -- . 2>/dev/null \
+    done < <(git diff --unified=0 "$RANGE" -- . "${SECRET_EXCLUDE[@]}" 2>/dev/null \
              | grep -E '^\+' | grep -Ev '^\+\+\+' | grep -iE -- "$SECRET_RE" | head -40)
 fi
 

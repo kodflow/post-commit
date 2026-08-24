@@ -182,6 +182,16 @@ check "github PAT" 1 "$d"
 d=$(mkrepo); echo 'AKIAIOSFODNN7EXAMPLE' > "$d/f.txt"; git -C "$d" add -A; git -C "$d" commit -qm "chore: config"
 check "secret scan disabled" 0 "$d" PC_SECRETS=false
 
+d=$(mkrepo); mkdir -p "$d/tests" "$d/pkg/testdata"
+echo 'AKIAIOSFODNN7EXAMPLE' > "$d/tests/fixture.txt"; echo 'ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' > "$d/pkg/testdata/token.txt"
+echo 'password = "hunter2000"' > "$d/scanner_test.go"
+git -C "$d" add -A; git -C "$d" commit -qm "test: scanner fixtures"
+check "fake credentials under test/fixture paths are excluded" 0 "$d"
+
+d=$(mkrepo); mkdir -p "$d/tests"; echo 'AKIAIOSFODNN7EXAMPLE' > "$d/tests/fixture.txt"; echo 'AKIAIOSFODNN7EXAMPLE' > "$d/config.txt"
+git -C "$d" add -A; git -C "$d" commit -qm "chore: config"
+check "a real path still fails even with a fixture alongside" 1 "$d"
+
 echo "== usage errors (expect 2) =="
 d=$(mkrepo)
 out="$(cd "$d" && bash "$GATE" 2>&1)"; rc=$?
