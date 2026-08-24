@@ -19,6 +19,8 @@
 #     authenticated gh user's name and primary email).
 # Never touches file contents, dates, or ordinary prose. Vendor mentions
 # left in ordinary prose are listed at the end for a manual decision.
+# Known cost: git-filter-repo drops GPG signatures, so every signed commit
+# from the first rewritten one onward loses its signature.
 #
 # usage: rewrite-history.sh owner/repo [--execute] [--identity "Name <email>"]
 #                                      [--keep DIR]   (keep the mirror for inspection)
@@ -62,6 +64,11 @@ BEFORE_COUNT="$(git -C "$MIRROR" rev-list --branches --count)"
 BEFORE_OUT="$(cd "$MIRROR" && GITHUB_STEP_SUMMARY=/dev/null PC_MAX_REPORT=0 bash "$SCRIPT_DIR/post-commit.sh" --branches 2>&1 || true)"
 BEFORE_TAINT="$(printf '%s' "$BEFORE_OUT" | grep -oE '^::error::[0-9]+ tainted' | grep -oE '[0-9]+' || true)"
 : "${BEFORE_TAINT:=0}"
+
+if [ "$BEFORE_TAINT" -eq 0 ]; then
+    echo "  $REPO: history already clean on every branch — nothing to rewrite."
+    exit 0
+fi
 
 # --- identities: every author/committer that looks like an AI agent --------
 AI_ID='claude|anthropic|copilot|openai|chatgpt|gemini|devin|aider|cursor|codeium|\bai\b|\bllm\b'
