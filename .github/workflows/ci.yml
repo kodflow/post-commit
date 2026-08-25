@@ -37,3 +37,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: ./
+        with:
+          authors: kodflow
+          # range, not the default full: this repository's own history still
+          # carries a personal identity on every commit, so a full scan would
+          # fail the very PR that introduces the rule. Drop this line once
+          # scripts/rewrite-history.sh has run here — the fleet stub is on
+          # the same footing and flips back the same way.
+          history: range

@@ -150,6 +150,68 @@ check "'claude code' fails under strict" 1 "$d" PC_STRICT=true
 d=$(mkrepo); commit_msg "$d" "fix: handle .claude/ lookups"
 check "'.claude/' fails under strict" 1 "$d" PC_STRICT=true
 
+echo "== identity =="
+# The allowlist is opt-in: an empty PC_AUTHORS must not fail a repo that
+# never asked for the rule (every case above runs with dev@example.com).
+d=$(mkrepo); commit_msg "$d" "feat: thing"
+check "no PC_AUTHORS — identity check is off" 0 "$d"
+
+d=$(mkrepo)
+git -C "$d" config user.email "133899878+kodflow@users.noreply.github.com"
+git -C "$d" config user.name "Kodflow"
+commit_msg "$d" "feat: thing"
+check "allowed login with id prefix" 0 "$d" PC_AUTHORS=kodflow PC_HISTORY=range
+
+d=$(mkrepo)
+git -C "$d" config user.email "kodflow@users.noreply.github.com"
+commit_msg "$d" "feat: thing"
+check "allowed login without id prefix" 0 "$d" PC_AUTHORS=kodflow PC_HISTORY=range
+
+d=$(mkrepo)
+git -C "$d" config user.email "florent@making.codes"
+git -C "$d" config user.name "Florent"
+commit_msg "$d" "feat: thing"
+check "personal identity is refused" 1 "$d" PC_AUTHORS=kodflow PC_HISTORY=range
+
+d=$(mkrepo)
+git -C "$d" config user.email "someone-else@users.noreply.github.com"
+commit_msg "$d" "feat: thing"
+check "another GitHub account is refused" 1 "$d" PC_AUTHORS=kodflow PC_HISTORY=range
+
+# A clean author with a foreign committer still fails: rewriting only the
+# author half is exactly how a bad identity survives a sloppy fixup.
+d=$(mkrepo)
+git -C "$d" config user.email "133899878+kodflow@users.noreply.github.com"
+echo x > "$d/f.txt"; git -C "$d" add -A
+GIT_COMMITTER_NAME="Florent" GIT_COMMITTER_EMAIL="florent@making.codes" \
+    git -C "$d" commit -qm "feat: thing"
+check "foreign committer is refused even with an allowed author" 1 "$d" PC_AUTHORS=kodflow PC_HISTORY=range
+
+d=$(mkrepo)
+git -C "$d" config user.email "49699333+dependabot[bot]@users.noreply.github.com"
+git -C "$d" config user.name "dependabot[bot]"
+commit_msg "$d" "chore: bump actions/checkout"
+check "bot accounts are always allowed" 0 "$d" PC_AUTHORS=kodflow PC_HISTORY=range
+
+d=$(mkrepo)
+git -C "$d" config user.email "noreply@github.com"
+git -C "$d" config user.name "GitHub"
+commit_msg "$d" "feat: merged through the web UI"
+check "GitHub's own merge committer is allowed" 0 "$d" PC_AUTHORS=kodflow PC_HISTORY=range
+
+d=$(mkrepo)
+git -C "$d" config user.email "second@users.noreply.github.com"
+commit_msg "$d" "feat: thing"
+check "several logins in the list" 0 "$d" PC_AUTHORS="kodflow,second" PC_HISTORY=range
+
+# full history is the fleet default: one foreign ancestor blocks a clean tip.
+d=$(mkrepo)
+git -C "$d" config user.email "florent@making.codes"
+commit_msg "$d" "feat: tainted ancestor"
+git -C "$d" config user.email "133899878+kodflow@users.noreply.github.com"
+commit_msg "$d" "feat: clean tip"
+check "foreign ancestor blocks a clean tip in full mode" 1 "$d" PC_AUTHORS=kodflow
+
 echo "== format (expect 1) =="
 d=$(mkrepo); commit_msg "$d" "Update README.md"
 check "GitHub web-UI default subject" 1 "$d"
