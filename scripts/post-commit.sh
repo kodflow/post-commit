@@ -8,14 +8,17 @@
 # on GitHub against commits that already exist, so there is nothing to skip.
 #
 # Three checks, each switchable:
-#   1. attribution — no AI attribution in ANY commit reachable from the head
+#   1. identity    — every commit's author AND committer is one of the allowed
+#                    accounts (PC_AUTHORS). A repository's history must carry
+#                    the owning GitHub account, not a personal identity.
+#   2. attribution — no AI attribution in ANY commit reachable from the head
 #                    (PC_HISTORY=full, the default) or in the range only
 #                    (PC_HISTORY=range). Also inspects author AND committer
 #                    identity: a commit authored as "Claude <noreply@…>"
 #                    carries no trailer at all.
-#   2. format      — conventional-commit subject on the range's non-merge
+#   3. format      — conventional-commit subject on the range's non-merge
 #                    commits (project convention, see devcontainer-template).
-#   3. secrets     — no credential-shaped ADDED lines in the range's diff.
+#   4. secrets     — no credential-shaped ADDED lines in the range's diff.
 #
 # Deliberately NOT here: lint/build/test. Every repo's own CI already runs
 # those server-side, so --no-verify never bypassed them in the first place.
@@ -36,6 +39,7 @@ STRICT="${PC_STRICT:-false}"
 SECRETS="${PC_SECRETS:-true}"
 HISTORY="${PC_HISTORY:-full}"
 FORMAT="${PC_FORMAT:-true}"
+AUTHORS="${PC_AUTHORS:-}"
 MAX_REPORT="${PC_MAX_REPORT:-50}"
 SUMMARY="${GITHUB_STEP_SUMMARY:-/dev/null}"
 
@@ -67,9 +71,31 @@ if [ "${#PATTERNS[@]}" -eq 0 ]; then
     exit 2
 fi
 
-ATTR_FILE="$(mktemp)"; FMT_FILE="$(mktemp)"; SEC_FILE="$(mktemp)"
-trap 'rm -f "$ATTR_FILE" "$FMT_FILE" "$SEC_FILE"' EXIT
-ATTR_N=0; ATTR_SCANNED=0; FMT_N=0; FMT_SCANNED=0; SEC_N=0
+# --- Allowed identities -----------------------------------------------------
+# PC_AUTHORS is a space/comma separated list of GitHub logins. Each expands to
+# the noreply address GitHub gives that account, with or without the numeric
+# id prefix. An empty list disables the check — a repo that has not opted in
+# must not start failing on a rule it never asked for.
+#
+# Always allowed on top of the list, because refusing them would fail commits
+# no human can re-author:
+#   · GitHub itself (`noreply@github.com`) — the committer of every squash
+#     and merge performed through the web UI or the API;
+#   · app/bot accounts (`…[bot]@users.noreply.github.com`) — dependabot,
+#     github-actions and friends.
+IDENT_RE=""
+if [ -n "$AUTHORS" ]; then
+    for login in ${AUTHORS//,/ }; do
+        esc_login="$(printf '%s' "$login" | sed 's/[][\.^$*+?(){}|]/\\&/g')"
+        IDENT_RE="${IDENT_RE}|^([0-9]+\+)?${esc_login}@users\.noreply\.github\.com$"
+    done
+    IDENT_RE="${IDENT_RE#|}"
+    IDENT_RE="${IDENT_RE}|^noreply@github\.com$|^[0-9]+\+[^@]+\[bot\]@users\.noreply\.github\.com$"
+fi
+
+ATTR_FILE="$(mktemp)"; FMT_FILE="$(mktemp)"; SEC_FILE="$(mktemp)"; IDENT_FILE="$(mktemp)"
+trap 'rm -f "$ATTR_FILE" "$FMT_FILE" "$SEC_FILE" "$IDENT_FILE"' EXIT
+ATTR_N=0; ATTR_SCANNED=0; FMT_N=0; FMT_SCANNED=0; SEC_N=0; IDENT_N=0
 
 # --- 1. Attribution ---------------------------------------------------------
 # %x1f separates fields, %x1e ends the record: a body is arbitrary multi-line
@@ -92,6 +118,19 @@ while IFS= read -r -d $'\x1e' REC; do
     CE="${REST%%$'\x1f'*}"; REST="${REST#*$'\x1f'}"
     SUBJ="${REST%%$'\x1f'*}"; BODY="${REST#*$'\x1f'}"
     ATTR_SCANNED=$((ATTR_SCANNED + 1))
+
+    if [ -n "$IDENT_RE" ]; then
+        BAD=""
+        printf '%s' "$AE" | grep -qiE -- "$IDENT_RE" || BAD="author $AN <$AE>"
+        if ! printf '%s' "$CE" | grep -qiE -- "$IDENT_RE"; then
+            [ -n "$BAD" ] && BAD="$BAD; "
+            BAD="${BAD}committer $CN <$CE>"
+        fi
+        if [ -n "$BAD" ]; then
+            IDENT_N=$((IDENT_N + 1))
+            [ "$IDENT_N" -le "$MAX_REPORT" ] && printf '%s\t%s\t%s\n' "$SHA" "$SUBJ" "$BAD" >> "$IDENT_FILE"
+        fi
+    fi
 
     HAY="$BODY"$'\n'"author: $AN <$AE>"$'\n'"committer: $CN <$CE>"
     for pattern in "${PATTERNS[@]}"; do
@@ -161,8 +200,26 @@ esc() { printf '%s' "$1" | sed 's/|/\\|/g; s/`/ʼ/g'; }
     fi
     [ -n "$RANGE" ] && echo "Format: **$FMT_SCANNED** non-merge commit(s) in \`$RANGE\`. Secrets: added lines in \`$RANGE\`."
     echo ""
-    if [ "$ATTR_N" -eq 0 ] && [ "$FMT_N" -eq 0 ] && [ "$SEC_N" -eq 0 ]; then
-        echo "✅ Clean — no AI attribution, conventional subjects, no credentials added."
+    if [ "$ATTR_N" -eq 0 ] && [ "$FMT_N" -eq 0 ] && [ "$SEC_N" -eq 0 ] && [ "$IDENT_N" -eq 0 ]; then
+        echo "✅ Clean — allowed identities, no AI attribution, conventional subjects, no credentials added."
+    fi
+    if [ "$IDENT_N" -gt 0 ]; then
+        echo "### ❌ Foreign identity — $IDENT_N commit(s)"
+        echo ""
+        echo "Allowed: \`${AUTHORS}\` (GitHub noreply addresses), plus GitHub's own"
+        echo "merge committer and app/bot accounts."
+        echo ""
+        echo "| Commit | Subject | Identity |"
+        echo "|---|---|---|"
+        while IFS=$'\t' read -r sha subj who; do
+            printf '| `%s` | %s | %s |\n' "${sha:0:8}" "$(esc "$subj")" "$(esc "$who")"
+        done < "$IDENT_FILE"
+        [ "$IDENT_N" -gt "$MAX_REPORT" ] && echo "" && echo "_… and $((IDENT_N - MAX_REPORT)) more._"
+        echo ""
+        echo "> Set your repository identity to the owning account before committing:"
+        echo "> \`git config user.email <id>+<login>@users.noreply.github.com\`."
+        [ "$HISTORY" = "full" ] && echo "> Existing commits need \`scripts/rewrite-history.sh\`."
+        echo ""
     fi
     if [ "$ATTR_N" -gt 0 ]; then
         echo "### ❌ AI attribution — $ATTR_N commit(s)"
@@ -201,6 +258,13 @@ esc() { printf '%s' "$1" | sed 's/|/\\|/g; s/`/ʼ/g'; }
 } >> "$SUMMARY"
 
 RC=0
+if [ "$IDENT_N" -gt 0 ]; then
+    RC=1
+    while IFS=$'\t' read -r sha subj who; do
+        echo "::error::foreign identity in ${sha:0:8} (${subj}) — ${who}"
+    done < "$IDENT_FILE"
+    echo "::error::$IDENT_N commit(s) not authored by an allowed account (${AUTHORS})"
+fi
 if [ "$ATTR_N" -gt 0 ]; then
     RC=1
     while IFS=$'\t' read -r sha subj pat match; do
@@ -220,6 +284,6 @@ if [ "$SEC_N" -gt 0 ]; then
 fi
 
 if [ "$RC" -eq 0 ]; then
-    echo "✅ post-commit: $ATTR_SCANNED commit(s) attribution-free, $FMT_SCANNED subject(s) conventional, no credentials added"
+    echo "✅ post-commit: $ATTR_SCANNED commit(s) attribution-free${IDENT_RE:+ and correctly attributed}, $FMT_SCANNED subject(s) conventional, no credentials added"
 fi
 exit "$RC"
