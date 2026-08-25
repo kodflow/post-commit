@@ -4,14 +4,22 @@
 # which is what the fleet rulesets require.
 name: post-commit
 description: >-
-  Mandatory merge gate: no AI attribution anywhere in history, conventional
-  commit subjects, no credentials added. Logic lives in kodflow/post-commit —
+  Mandatory merge gate: every commit authored by an allowed account, no AI
+  attribution anywhere in history, conventional commit subjects, no
+  credentials added. Logic lives in kodflow/post-commit —
   callers pin @main so a fix there is live everywhere on the next run.
 branding:
   icon: shield
   color: red
 
 inputs:
+  authors:
+    description: >-
+      Space/comma separated GitHub logins allowed to author and commit. Each
+      expands to that account's noreply address, with or without the numeric
+      id prefix. GitHub's own merge committer and app/bot accounts are always
+      accepted on top. Empty (the default) disables the check.
+    default: ''
   strict:
     description: Also apply patterns-strict.txt (bare vendor keywords, .claude/ paths).
     default: 'false'
@@ -83,6 +91,7 @@ runs:
     - name: post-commit
       shell: bash
       env:
+        PC_AUTHORS: ${{ inputs.authors }}
         PC_STRICT: ${{ inputs.strict }}
         PC_HISTORY: ${{ inputs.history }}
         PC_FORMAT: ${{ inputs.format }}
