@@ -15,7 +15,7 @@
 #     footers. A subject line is scrubbed of 🤖 / "(AI-assisted)" fragments
 #     but never deleted — an empty subject is worse than a tainted one; a
 #     subject that still matches is listed for a human to reword.
-#   · author/committer identities of AI agents → --identity (default: the
+#   · author/committer identities outside --authors → --identity (default: the
 #     authenticated gh user's name and primary email).
 # Never touches file contents, dates, or ordinary prose. Vendor mentions
 # left in ordinary prose are listed at the end for a manual decision.
@@ -23,6 +23,7 @@
 # from the first rewritten one onward loses its signature.
 #
 # usage: rewrite-history.sh owner/repo [--execute] [--identity "Name <email>"]
+#                                      [--authors "login[,login]"]
 #                                      [--keep DIR]   (keep the mirror for inspection)
 # needs: git-filter-repo, gh, python3.
 # ============================================================================
@@ -30,24 +31,28 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO="${1:-}"; shift || true
-EXECUTE=false; IDENTITY=""; KEEP=""
+EXECUTE=false; IDENTITY=""; KEEP=""; AUTHORS=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --execute) EXECUTE=true ;;
         --identity) IDENTITY="$2"; shift ;;
+        --authors) AUTHORS="$2"; shift ;;
         --keep) KEEP="$2"; shift ;;
         *) echo "unknown option: $1" >&2; exit 2 ;;
     esac; shift
 done
-[ -n "$REPO" ] || { echo "usage: rewrite-history.sh owner/repo [--execute] [--identity 'Name <email>'] [--keep DIR]" >&2; exit 2; }
+[ -n "$REPO" ] || { echo "usage: rewrite-history.sh owner/repo [--execute] [--identity 'Name <email>'] [--authors 'login[,login]'] [--keep DIR]" >&2; exit 2; }
 command -v git-filter-repo >/dev/null || { echo "git-filter-repo is required (apt install git-filter-repo)" >&2; exit 2; }
 
+# The replacement identity is the account's GitHub noreply address, never its
+# primary email: a private address is exactly what the identity gate refuses,
+# so mapping onto one would leave the history failing after the rewrite.
+LOGIN="$(gh api user --jq .login)"
+UID_NUM="$(gh api user --jq .id)"
+[ -n "$AUTHORS" ] || AUTHORS="$LOGIN"
 if [ -z "$IDENTITY" ]; then
     NAME="$(gh api user --jq '.name // .login')"
-    EMAIL="$(gh api user/emails --jq '.[] | select(.primary) | .email' 2>/dev/null || true)"
-    [ -n "$EMAIL" ] || EMAIL="$(git config --global user.email || true)"
-    [ -n "$EMAIL" ] || { echo "cannot determine an email for --identity; pass it explicitly" >&2; exit 2; }
-    IDENTITY="$NAME <$EMAIL>"
+    IDENTITY="$NAME <${UID_NUM}+${LOGIN}@users.noreply.github.com>"
 fi
 
 WORK="${KEEP:-$(mktemp -d)}"
@@ -61,19 +66,38 @@ git clone --mirror -q "https://github.com/$REPO.git" "$MIRROR" || exit 1
 BEFORE_COUNT="$(git -C "$MIRROR" rev-list --branches --count)"
 # The gate exits 1 on a tainted history — expected here — and `pipefail`
 # would turn that into a pipeline failure, so capture first, parse after.
-BEFORE_OUT="$(cd "$MIRROR" && GITHUB_STEP_SUMMARY=/dev/null PC_MAX_REPORT=0 bash "$SCRIPT_DIR/post-commit.sh" --branches 2>&1 || true)"
+BEFORE_OUT="$(cd "$MIRROR" && GITHUB_STEP_SUMMARY=/dev/null PC_MAX_REPORT=0 PC_AUTHORS="$AUTHORS" bash "$SCRIPT_DIR/post-commit.sh" --branches 2>&1 || true)"
 BEFORE_TAINT="$(printf '%s' "$BEFORE_OUT" | grep -oE '^::error::[0-9]+ tainted' | grep -oE '[0-9]+' || true)"
 : "${BEFORE_TAINT:=0}"
+# Identity violations are counted separately: a repository can be free of AI
+# attribution and still carry a personal address on every commit, which is
+# just as much a reason to rewrite.
+BEFORE_IDENT="$(printf '%s' "$BEFORE_OUT" | grep -oE '^::error::[0-9]+ commit\(s\) not authored' | grep -oE '[0-9]+' || true)"
+: "${BEFORE_IDENT:=0}"
 
-if [ "$BEFORE_TAINT" -eq 0 ]; then
+if [ "$BEFORE_TAINT" -eq 0 ] && [ "$BEFORE_IDENT" -eq 0 ]; then
     echo "  $REPO: history already clean on every branch — nothing to rewrite."
     exit 0
 fi
 
-# --- identities: every author/committer that looks like an AI agent --------
-AI_ID='claude|anthropic|copilot|openai|chatgpt|gemini|devin|aider|cursor|codeium|\bai\b|\bllm\b'
+# --- identities -------------------------------------------------------------
+# Everything that is not one of the allowed accounts is remapped, not just the
+# AI agents: a personal address on a commit is the same leak as an assistant's
+# trailer and the gate's identity check refuses both. The two families the
+# gate accepts on top of the list are left alone here for the same reason it
+# accepts them — GitHub's merge committer and app accounts cannot be
+# re-authored as a human.
+ALLOWED_RE=""
+for login in ${AUTHORS//,/ }; do
+    esc="$(printf '%s' "$login" | sed 's/[][\\.^$*+?(){}|]/\\&/g')"
+    ALLOWED_RE="${ALLOWED_RE}|<([0-9]+\+)?${esc}@users\.noreply\.github\.com>$"
+done
+ALLOWED_RE="${ALLOWED_RE#|}"
+ALLOWED_RE="${ALLOWED_RE}|<noreply@github\.com>$|<[0-9]+\+[^@]+\[bot\]@users\.noreply\.github\.com>$"
+
 MAILMAP="$WORK/mailmap"
-git -C "$MIRROR" log --branches --format='%an <%ae>%n%cn <%ce>' | sort -u | grep -iE -- "$AI_ID" \
+git -C "$MIRROR" log --branches --format='%an <%ae>%n%cn <%ce>' | sort -u \
+    | grep -viE -- "$ALLOWED_RE" \
     | while IFS= read -r id; do printf '%s %s\n' "$IDENTITY" "$id"; done > "$MAILMAP"
 ID_COUNT="$(wc -l < "$MAILMAP" | tr -d ' ')"
 
@@ -110,7 +134,7 @@ while out and not out[0].strip():
 return subject + (b'\n\n' + b'\n'.join(out) if out else b'') + b'\n'
 PY
 
-echo "▸ rewriting messages and identities ($ID_COUNT AI identit$([ "$ID_COUNT" = 1 ] && echo y || echo ies) → $IDENTITY)"
+echo "▸ rewriting messages and identities ($ID_COUNT foreign identit$([ "$ID_COUNT" = 1 ] && echo y || echo ies) → $IDENTITY)"
 ( cd "$MIRROR" && git filter-repo --quiet --force --mailmap "$MAILMAP" \
       --message-callback "$(cat "$CALLBACK")" ) >"$WORK/filter-repo.log" 2>&1 \
     || { echo "filter-repo failed:" >&2; cat "$WORK/filter-repo.log" >&2; exit 1; }
@@ -120,7 +144,7 @@ AFTER_COUNT="$(git -C "$MIRROR" rev-list --branches --count)"
 CHANGED="$(awk 'NR>1 && $1!=$2' "$MIRROR/filter-repo/commit-map" 2>/dev/null | wc -l | tr -d ' ')"
 
 # --- verify with the gate itself --------------------------------------------
-GATE_OUT="$(cd "$MIRROR" && GITHUB_STEP_SUMMARY=/dev/null PC_MAX_REPORT=20 bash "$SCRIPT_DIR/post-commit.sh" --branches 2>&1)"
+GATE_OUT="$(cd "$MIRROR" && GITHUB_STEP_SUMMARY=/dev/null PC_MAX_REPORT=20 PC_AUTHORS="$AUTHORS" bash "$SCRIPT_DIR/post-commit.sh" --branches 2>&1)"
 GATE_RC=$?
 RESIDUAL_KW="$(git -C "$MIRROR" log --branches --format='%h %s%n%b' | grep -iE 'claude|anthropic|copilot|chatgpt|openai|gemini|\bllm\b' | head -20)"
 OPEN_PRS="$(gh pr list --repo "$REPO" --state open --json number,title --jq '.[] | "#\(.number) \(.title)"' 2>/dev/null)"
@@ -131,6 +155,7 @@ echo "  $REPO"
 echo "════════════════════════════════════════════════════════════"
 echo "  commits          : $BEFORE_COUNT → $AFTER_COUNT (count unchanged by design)"
 echo "  tainted before   : $BEFORE_TAINT"
+echo "  foreign identity : $BEFORE_IDENT commit(s)"
 echo "  commits rewritten: $CHANGED (new SHA)"
 echo "  identities mapped: $ID_COUNT"
 [ "$ID_COUNT" -gt 0 ] && sed 's/^/      /' "$MAILMAP"

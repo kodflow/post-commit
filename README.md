@@ -130,9 +130,22 @@ Idempotent: re-running never duplicates a PR or a ruleset.
 
 `scripts/rewrite-history.sh owner/repo` is a **dry run**: it mirrors the
 repo into a temp dir, rewrites it there, verifies the result with the gate
-and prints exactly what changed — commits rewritten, AI identities remapped,
+and prints exactly what changed — commits rewritten, identities remapped,
 subjects a human must reword, vendor mentions left in ordinary prose, open
 PRs that will need a rebase. Nothing reaches GitHub.
+
+It remaps **every** author and committer outside `--authors` (default: the
+authenticated gh login), not just the AI agents — a personal address is the
+same leak as an assistant's trailer, and the identity check refuses both. The
+replacement is that account's GitHub noreply address, never a private one:
+mapping onto a private address would leave the history failing the very gate
+the rewrite exists to satisfy.
+
+> **Signed repositories.** git-filter-repo drops GPG signatures, so a repo
+> whose ruleset carries `required_signatures` comes out of a rewrite with an
+> entirely unverified history and can no longer merge anything. Today that is
+> `kodflow/terraform-provider-n8n` and `supervizio/agent` — decide what to do
+> with the rule before rewriting either.
 
 `--execute` force-pushes every branch and tag of the rewritten mirror. After
 that, every commit SHA from the first tainted one onward is different (and
@@ -150,7 +163,7 @@ scripts/post-commit.sh        the gate
 scripts/patterns.txt          default forbidden patterns (attribution-shaped)
 scripts/patterns-strict.txt   opt-in keyword patterns
 scripts/enforce.sh            fleet: stub PR + ruleset, idempotent
-scripts/rewrite-history.sh    history scrub, dry-run by default
+scripts/rewrite-history.sh    history scrub (messages + identities), dry-run by default
 stub/post-commit.yml          the file installed in each repo
 stub/pr-body.md               the PR body enforce.sh uses
 tests/run.sh                  behaviour tests against real throwaway repos
