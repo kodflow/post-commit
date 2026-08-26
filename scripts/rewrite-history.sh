@@ -16,7 +16,11 @@
 #     but never deleted — an empty subject is worse than a tainted one; a
 #     subject that still matches is listed for a human to reword.
 #   · author/committer identities outside --authors → --identity (default: the
-#     authenticated gh user's name and primary email).
+#     authenticated gh user's name and primary email). --remap overrides that
+#     per address, so a co-contributor's commits keep their own account
+#     instead of being folded onto the default identity: the gate only ever
+#     accepted GitHub noreply addresses, so a personal address still has to
+#     move — but it moves to that person's own noreply, not to someone else's.
 # Never touches file contents, dates, or ordinary prose. Vendor mentions
 # left in ordinary prose are listed at the end for a manual decision.
 # Known cost: git-filter-repo drops GPG signatures, so every signed commit
@@ -31,17 +35,18 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO="${1:-}"; shift || true
-EXECUTE=false; IDENTITY=""; KEEP=""; AUTHORS=""
+EXECUTE=false; IDENTITY=""; KEEP=""; AUTHORS=""; REMAP=()
 while [ $# -gt 0 ]; do
     case "$1" in
         --execute) EXECUTE=true ;;
         --identity) IDENTITY="$2"; shift ;;
         --authors) AUTHORS="$2"; shift ;;
+        --remap) REMAP+=("$2"); shift ;;
         --keep) KEEP="$2"; shift ;;
         *) echo "unknown option: $1" >&2; exit 2 ;;
     esac; shift
 done
-[ -n "$REPO" ] || { echo "usage: rewrite-history.sh owner/repo [--execute] [--identity 'Name <email>'] [--authors 'login[,login]'] [--keep DIR]" >&2; exit 2; }
+[ -n "$REPO" ] || { echo "usage: rewrite-history.sh owner/repo [--execute] [--identity 'Name <email>'] [--authors 'login[,login]'] [--remap 'old@email=Name <new@email>'] [--keep DIR]" >&2; exit 2; }
 command -v git-filter-repo >/dev/null || { echo "git-filter-repo is required (apt install git-filter-repo)" >&2; exit 2; }
 
 # The replacement identity is the account's GitHub noreply address, never its
@@ -96,9 +101,26 @@ ALLOWED_RE="${ALLOWED_RE#|}"
 ALLOWED_RE="${ALLOWED_RE}|<noreply@github\.com>$|<[0-9]+\+[^@]+\[bot\]@users\.noreply\.github\.com>$"
 
 MAILMAP="$WORK/mailmap"
+: > "$MAILMAP"
+
+# --remap entries are written first and then held out of the catch-all below,
+# so an address named here lands on the identity it was given and never on
+# $IDENTITY. Anything not named still falls through to the catch-all.
+REMAP_RE=""
+for entry in ${REMAP[@]+"${REMAP[@]}"}; do
+    old_addr="${entry%%=*}"; new_id="${entry#*=}"
+    [ "$old_addr" != "$entry" ] && [ -n "$new_id" ] || {
+        echo "--remap takes old@email=Name <new@email>, got: $entry" >&2; exit 2; }
+    printf '%s <%s>\n' "$new_id" "$old_addr" >> "$MAILMAP"
+    esc="$(printf '%s' "$old_addr" | sed 's/[][\\.^$*+?(){}|]/\\&/g')"
+    REMAP_RE="${REMAP_RE}|<${esc}>\$"
+done
+REMAP_RE="${REMAP_RE#|}"
+
 git -C "$MIRROR" log --branches --format='%an <%ae>%n%cn <%ce>' | sort -u \
     | grep -viE -- "$ALLOWED_RE" \
-    | while IFS= read -r id; do printf '%s %s\n' "$IDENTITY" "$id"; done > "$MAILMAP"
+    | { [ -n "$REMAP_RE" ] && grep -viE -- "$REMAP_RE" || cat; } \
+    | while IFS= read -r id; do printf '%s %s\n' "$IDENTITY" "$id"; done >> "$MAILMAP"
 ID_COUNT="$(wc -l < "$MAILMAP" | tr -d ' ')"
 
 # --- messages ----------------------------------------------------------------
