@@ -21,7 +21,11 @@
 #     instead of being folded onto the default identity: the gate only ever
 #     accepted GitHub noreply addresses, so a personal address still has to
 #     move — but it moves to that person's own noreply, not to someone else's.
-# Never touches file contents, dates, or ordinary prose. Vendor mentions
+#   · --redact substitutions inside message text. Ordinary prose is otherwise
+#     left alone, but a name or a personal address written into a sentence is
+#     the same identifying data as one in a trailer; substituting it keeps the
+#     sentence and its meaning while removing the identity. Nothing is deleted.
+# Never touches file contents or dates, and never deletes prose. Vendor mentions
 # left in ordinary prose are listed at the end for a manual decision.
 # Known cost: git-filter-repo drops GPG signatures, so every signed commit
 # from the first rewritten one onward loses its signature.
@@ -35,18 +39,19 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO="${1:-}"; shift || true
-EXECUTE=false; IDENTITY=""; KEEP=""; AUTHORS=""; REMAP=()
+EXECUTE=false; IDENTITY=""; KEEP=""; AUTHORS=""; REMAP=(); REDACT=()
 while [ $# -gt 0 ]; do
     case "$1" in
         --execute) EXECUTE=true ;;
         --identity) IDENTITY="$2"; shift ;;
         --authors) AUTHORS="$2"; shift ;;
         --remap) REMAP+=("$2"); shift ;;
+        --redact) REDACT+=("$2"); shift ;;
         --keep) KEEP="$2"; shift ;;
         *) echo "unknown option: $1" >&2; exit 2 ;;
     esac; shift
 done
-[ -n "$REPO" ] || { echo "usage: rewrite-history.sh owner/repo [--execute] [--identity 'Name <email>'] [--authors 'login[,login]'] [--remap 'old@email=Name <new@email>'] [--keep DIR]" >&2; exit 2; }
+[ -n "$REPO" ] || { echo "usage: rewrite-history.sh owner/repo [--execute] [--identity 'Name <email>'] [--authors 'login[,login]'] [--remap 'old@email=Name <new@email>'] [--redact 'regex=replacement'] [--keep DIR]" >&2; exit 2; }
 command -v git-filter-repo >/dev/null || { echo "git-filter-repo is required (apt install git-filter-repo)" >&2; exit 2; }
 
 # The replacement identity is the account's GitHub noreply address, never its
@@ -84,7 +89,10 @@ BEFORE_IDENT="$(printf '%s' "$BEFORE_OUT" | grep -oE '^::error::[0-9]+ commit\(s
 BEFORE_TRAIL="$(printf '%s' "$BEFORE_OUT" | grep -oE '^::error::[0-9]+ commit\(s\) carry a trailer' | grep -oE '[0-9]+' || true)"
 : "${BEFORE_TRAIL:=0}"
 
-if [ "$BEFORE_TAINT" -eq 0 ] && [ "$BEFORE_IDENT" -eq 0 ] && [ "$BEFORE_TRAIL" -eq 0 ]; then
+# --redact has no gate counterpart — the gate does not read prose — so a repo
+# whose only problem is a name in a sentence looks clean here. Never skip when
+# redactions were asked for.
+if [ "${#REDACT[@]}" -eq 0 ] && [ "$BEFORE_TAINT" -eq 0 ] && [ "$BEFORE_IDENT" -eq 0 ] && [ "$BEFORE_TRAIL" -eq 0 ]; then
     echo "  $REPO: history already clean on every branch — nothing to rewrite."
     exit 0
 fi
@@ -120,6 +128,14 @@ for entry in ${REMAP[@]+"${REMAP[@]}"}; do
     esc="$(printf '%s' "$tgt" | sed 's/[][\\.^$*+?(){}|]/\\&/g')"
     ALLOWED_EMAIL_RE="${ALLOWED_EMAIL_RE}|^${esc}$"
 done
+REDACT_FILE="$WORK/redact.tsv"
+: > "$REDACT_FILE"
+for entry in ${REDACT[@]+"${REDACT[@]}"}; do
+    pat="${entry%%=*}"; rep="${entry#*=}"
+    [ "$pat" != "$entry" ] || { echo "--redact takes regex=replacement, got: $entry" >&2; exit 2; }
+    printf '%s\t%s\n' "$pat" "$rep" >> "$REDACT_FILE"
+done
+
 ALLOWED_RE_FILE="$WORK/allowed.re"
 printf '%s' "$ALLOWED_EMAIL_RE" > "$ALLOWED_RE_FILE"
 
@@ -173,6 +189,19 @@ EMAIL = re.compile(rb'<([^>]*)>')
 with open('__ALLOWED_RE_PATH__', 'rb') as fh:
     ALLOWED = re.compile(fh.read().strip(), re.I)
 
+REDACTIONS = []
+with open('__REDACT_PATH__', 'rb') as fh:
+    for raw in fh.read().split(b'\n'):
+        if not raw.strip():
+            continue
+        pat, _, rep = raw.partition(b'\t')
+        REDACTIONS.append((re.compile(pat, re.I), rep))
+
+def redact(text):
+    for rx, rep in REDACTIONS:
+        text = rx.sub(rep, text)
+    return text
+
 def foreign_trailer(l):
     if not TRAILER.match(l):
         return False
@@ -189,7 +218,8 @@ lines = message.split(b'\n')
 # Strict no-op on a clean message: whitespace normalisation alone must not
 # rewrite a commit, or every untainted commit gets a new SHA for nothing.
 if not any(ATTR.search(l) or ROBOT in l or foreign_trailer(l) for l in lines):
-    return message
+    redacted = redact(message)
+    return redacted if redacted != message else message
 subject = lines[0].replace(ROBOT, b'')
 subject = re.sub(rb'(?i)\s*[\(\[]?\bai[-\s]?assisted[\)\]]?', b'', subject).rstrip()
 body = [l for l in lines[1:] if not (ATTR.search(l) or ROBOT in l or foreign_trailer(l))]
@@ -202,10 +232,10 @@ for l in body:
     out.append(l)
 while out and not out[0].strip():
     out.pop(0)
-return subject + (b'\n\n' + b'\n'.join(out) if out else b'') + b'\n'
+return redact(subject + (b'\n\n' + b'\n'.join(out) if out else b'') + b'\n')
 PY
 
-sed -i "s|__ALLOWED_RE_PATH__|$ALLOWED_RE_FILE|" "$CALLBACK"
+sed -i "s|__ALLOWED_RE_PATH__|$ALLOWED_RE_FILE|;s|__REDACT_PATH__|$REDACT_FILE|" "$CALLBACK"
 
 echo "▸ rewriting messages and identities ($ID_COUNT foreign identit$([ "$ID_COUNT" = 1 ] && echo y || echo ies) → $IDENTITY)"
 ( cd "$MIRROR" && git filter-repo --quiet --force --mailmap "$MAILMAP" \
