@@ -17,6 +17,11 @@ on:
     types: [opened, synchronize, reopened]
   push:
     branches: [main, master]
+  # On demand: the gate reads the whole history, so its verdict can change
+  # without this repository changing — a new rule lands in kodflow/post-commit,
+  # or the history is rewritten under it. Without this you cannot ask a quiet
+  # repository whether it is still clean; you have to push something to find out.
+  workflow_dispatch:
 
 permissions:
   contents: read
