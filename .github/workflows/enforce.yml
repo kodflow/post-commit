@@ -4,6 +4,13 @@
 name: enforce
 
 on:
+  # Self-healing. A ruleset is not protected by anything — an admin can delete
+  # it, weaken it, or put a bypass actor back, and nothing reports that. The
+  # gate would keep running and keep reporting while quietly no longer being
+  # required. Reconciling on a schedule turns that from a silent hole into a
+  # window of at most a day, and the run's summary shows what it had to repair.
+  schedule:
+    - cron: '17 4 * * *'
   workflow_dispatch:
     inputs:
       targets:
@@ -25,8 +32,8 @@ jobs:
       - name: enforce
         env:
           GH_TOKEN: ${{ secrets.FLEET_TOKEN }}
-          TARGETS: ${{ inputs.targets }}
-          APPLY: ${{ inputs.apply }}
+          TARGETS: ${{ inputs.targets || '--all' }}
+          APPLY: ${{ github.event_name == 'schedule' && 'true' || inputs.apply }}
         run: |
           if [ -z "$GH_TOKEN" ]; then
             echo "::error::FLEET_TOKEN secret is not set (PAT with repo + workflow scopes, admin on targets)"
@@ -34,3 +41,23 @@ jobs:
           fi
           # shellcheck disable=SC2086 — TARGETS is a deliberate word list
           bash scripts/enforce.sh $([ "$APPLY" = "true" ] && echo --apply) --report "$GITHUB_STEP_SUMMARY" $TARGETS
+
+      # The reconciliation above puts rulesets back; this says whether the fleet
+      # actually ends up enforced, which is not the same question. A repository
+      # can carry a ruleset and still be bypassable, and one on a Free-plan org
+      # cannot carry one at all.
+      - name: audit
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.FLEET_TOKEN }}
+          TARGETS: ${{ inputs.targets || '--all' }}
+        run: |
+          {
+            echo ""
+            echo "## enforcement audit"
+            echo ""
+            echo '```'
+            # shellcheck disable=SC2086
+            bash scripts/enforce.sh --audit $TARGETS
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
