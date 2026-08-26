@@ -212,6 +212,59 @@ git -C "$d" config user.email "133899878+kodflow@users.noreply.github.com"
 commit_msg "$d" "feat: clean tip"
 check "foreign ancestor blocks a clean tip in full mode" 1 "$d" PC_AUTHORS=kodflow
 
+# An identity trailer carries an address as durably as the author field. These
+# name a human, not an assistant, so the AI-attribution patterns never see them.
+d=$(mkrepo)
+git -C "$d" config user.email "133899878+kodflow@users.noreply.github.com"
+commit_msg "$d" "feat: thing
+
+Co-authored-by: Florent <florent.hagard@example.com>"
+check "personal address in a Co-authored-by is refused" 1 "$d" PC_AUTHORS=kodflow PC_HISTORY=range
+
+d=$(mkrepo)
+git -C "$d" config user.email "133899878+kodflow@users.noreply.github.com"
+commit_msg "$d" "feat: thing
+
+Signed-off-by: kodflow <music.music59@example.com>"
+check "personal address in a Signed-off-by is refused" 1 "$d" PC_AUTHORS=kodflow PC_HISTORY=range
+
+d=$(mkrepo)
+git -C "$d" config user.email "133899878+kodflow@users.noreply.github.com"
+commit_msg "$d" "feat: thing
+
+Co-authored-by: Kodflow <133899878+kodflow@users.noreply.github.com>"
+check "an allowed account in a trailer is fine" 0 "$d" PC_AUTHORS=kodflow PC_HISTORY=range
+
+# dependabot signs off as <support@github.com>, which no allow-list of human
+# logins can express — the [bot] suffix on the name is what clears it.
+d=$(mkrepo)
+git -C "$d" config user.email "133899878+kodflow@users.noreply.github.com"
+commit_msg "$d" "chore: bump something
+
+Signed-off-by: dependabot[bot] <support@github.com>"
+check "a [bot] trailer is allowed whatever its address" 0 "$d" PC_AUTHORS=kodflow PC_HISTORY=range
+
+d=$(mkrepo)
+git -C "$d" config user.email "133899878+kodflow@users.noreply.github.com"
+commit_msg "$d" "feat: thing
+
+Co-authored-by: Someone <someone@example.com>"
+check "the trailer check is off when no authors are declared" 0 "$d" PC_HISTORY=range
+
+# A tag can hold commits no branch reaches. --branches alone called that clean.
+d=$(mkrepo)
+git -C "$d" config user.email "133899878+kodflow@users.noreply.github.com"
+commit_msg "$d" "feat: clean base"
+git -C "$d" checkout -q -b side
+git -C "$d" config user.email "florent@making.codes"
+commit_msg "$d" "feat: tainted"
+git -C "$d" tag archived
+git -C "$d" checkout -q -
+git -C "$d" branch -qD side
+out="$(cd "$d" && env GITHUB_STEP_SUMMARY=/dev/null PC_AUTHORS=kodflow bash "$GATE" --branches 2>&1)"; rc=$?
+if [ "$rc" -eq 1 ]; then PASS=$((PASS+1)); printf '  ok   %s\n' "a commit only a tag reaches is still scanned"
+else FAIL=$((FAIL+1)); printf '  FAIL %s (want exit 1, got %s)\n' "a commit only a tag reaches is still scanned" "$rc"; fi
+
 echo "== format (expect 1) =="
 d=$(mkrepo); commit_msg "$d" "Update README.md"
 check "GitHub web-UI default subject" 1 "$d"
