@@ -12,7 +12,12 @@
 #                 look-alike status with a PAT;
 #               · no branch deletion, no non-fast-forward push (the
 #                 force-push protection the local hook used to provide);
-#               · bypass: repository admins, always — "only me, at the limit".
+#               · NO bypass actors. An admin bypass would make the whole thing
+#                 advisory: `gh pr merge --admin` merges straight through a red
+#                 gate, and the one account that would use it is the one the
+#                 gate exists to constrain. A rewrite still has a way through —
+#                 disable the ruleset, push, restore it — but that is a
+#                 deliberate, logged act, not a flag on a merge command.
 # A required status that is never reported blocks the merge, so once the
 # ruleset is in place deleting or renaming the stub blocks every PR: the
 # gate cannot be removed from below.
@@ -61,7 +66,7 @@ STUB_B64="$(base64 -w0 < "$STUB_FILE")"
 ruleset_payload() {
     jq -n --arg name "$RULESET_NAME" --argjson app "$GITHUB_ACTIONS_APP_ID" '{
         name: $name, target: "branch", enforcement: "active",
-        bypass_actors: [{actor_id: 5, actor_type: "RepositoryRole", bypass_mode: "always"}],
+        bypass_actors: [],
         conditions: {ref_name: {include: ["~DEFAULT_BRANCH"], exclude: []}},
         rules: [
             {type: "deletion"},
