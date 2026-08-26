@@ -28,8 +28,11 @@
 # Repos on a plan without rulesets (private repos in a Free org) are
 # reported as UNAVAILABLE — GitHub cannot enforce anything there.
 #
-# usage: enforce.sh [--apply] [--report FILE] (--all | owner/repo ...)
-#   dry-run unless --apply. Needs `gh` authenticated as an admin of the targets.
+# usage: enforce.sh [--apply] [--audit] [--report FILE] (--all | owner/repo ...)
+#   dry-run unless --apply. --audit only reads: it answers the three questions
+#   that decide whether the gate is real on a repository — is the workflow
+#   there, can the required status actually be enforced, and can anyone walk
+#   past it. Needs `gh` authenticated as an admin of the targets.
 # ============================================================================
 set -uo pipefail
 
@@ -39,12 +42,15 @@ STUB_PATH=".github/workflows/post-commit.yml"
 BRANCH="chore/post-commit"
 LEGACY_BRANCHES=("chore/commit-guard")
 RULESET_NAME="post-commit"
+# This repository gates itself through ci.yml, so it has no stub by design.
+SELF_REPO="kodflow/post-commit"
 GITHUB_ACTIONS_APP_ID=15368
-APPLY=false; REPORT=""; TARGETS=()
+APPLY=false; AUDIT=false; REPORT=""; TARGETS=()
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --apply) APPLY=true ;;
+        --audit) AUDIT=true ;;
         --report) REPORT="$2"; shift ;;
         --all)
             OWNER="$(gh api user --jq .login)"
@@ -59,7 +65,7 @@ while [ $# -gt 0 ]; do
     esac
     shift
 done
-[ "${#TARGETS[@]}" -gt 0 ] || { echo "usage: enforce.sh [--apply] [--report FILE] (--all | owner/repo ...)" >&2; exit 2; }
+[ "${#TARGETS[@]}" -gt 0 ] || { echo "usage: enforce.sh [--apply] [--audit] [--report FILE] (--all | owner/repo ...)" >&2; exit 2; }
 [ -r "$STUB_FILE" ] || { echo "stub not found: $STUB_FILE" >&2; exit 2; }
 STUB_B64="$(base64 -w0 < "$STUB_FILE")"
 
@@ -84,7 +90,7 @@ ensure_stub() {   # -> sets STUB_STATE, PR_URL
     # This repository gates itself through ci.yml (`uses: ./`, job named
     # post-commit) so the version under review is the one that runs; a stub
     # pinned to @main would test the wrong code. The ruleset still applies.
-    if [ "$repo" = "kodflow/post-commit" ]; then STUB_STATE="self"; return; fi
+    if [ "$repo" = "$SELF_REPO" ]; then STUB_STATE="self"; return; fi
     if gh api "repos/$repo/contents/$STUB_PATH?ref=$db" --jq .sha >/dev/null 2>&1; then
         STUB_STATE="present"; return
     fi
@@ -123,6 +129,43 @@ ensure_rule() {   # -> sets RULE_STATE
     out="$(ruleset_payload | gh api "repos/$repo/rulesets" -X POST --input - 2>&1)" \
         && RULE_STATE="created" || RULE_STATE="error:post:${out:0:80}"
 }
+
+
+# --- audit ------------------------------------------------------------------
+# Read-only. A ruleset that exists is not the same as a gate that holds: it can
+# carry bypass actors, in which case `gh pr merge --admin` walks straight
+# through a red status and the whole thing is advice. And GitHub refuses
+# rulesets outright on a private repository in a Free-plan org, so there the
+# status can run but can never be required. Both cases print here.
+if $AUDIT; then
+    printf '%-40s %-8s %-10s %-12s %s\n' REPOSITORY VISIBLE WORKFLOW REQUIRED BYPASS
+    ok=0; total=0
+    for repo in "${TARGETS[@]}"; do
+        total=$((total + 1))
+        db="$(gh repo view "$repo" --json defaultBranchRef --jq '.defaultBranchRef.name // empty' 2>/dev/null)"
+        [ -n "$db" ] || { printf '%-40s %-8s %-10s %-12s %s\n' "$repo" - empty - -; continue; }
+        vis="$(gh api "repos/$repo" --jq 'if .private then "private" else "public" end' 2>/dev/null)"
+        if gh api "repos/$repo/contents/$STUB_PATH?ref=$db" --jq .content >/dev/null 2>&1 \
+           || [ "$repo" = "$SELF_REPO" ]; then wf=yes; else wf=NO; fi
+        raw="$(gh api "repos/$repo/rulesets" 2>&1)"
+        if printf '%s' "$raw" | grep -q 'Upgrade to GitHub'; then
+            req="unavailable"; byp="-"
+        else
+            id="$(printf '%s' "$raw" | jq -r --arg n "$RULESET_NAME" '.[]|select(.name==$n)|.id' 2>/dev/null | head -1)"
+            if [ -z "$id" ]; then req=NO; byp="-"
+            else
+                req=yes
+                byp="$(gh api "repos/$repo/rulesets/$id" --jq '[.bypass_actors[]?]|length' 2>/dev/null)"
+                [ "$byp" = "0" ] || byp="$byp BYPASSABLE"
+            fi
+        fi
+        [ "$wf" = yes ] && [ "$req" = yes ] && [ "$byp" = "0" ] && ok=$((ok + 1))
+        printf '%-40s %-8s %-10s %-12s %s\n' "$repo" "$vis" "$wf" "$req" "$byp"
+    done
+    echo ""
+    echo "enforced: $ok / $total"
+    exit 0
+fi
 
 ROWS=()
 for repo in "${TARGETS[@]}"; do
