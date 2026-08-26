@@ -68,7 +68,7 @@ git clone --mirror -q "https://github.com/$REPO.git" "$MIRROR" || exit 1
 
 # --branches, not --all: a mirror also carries GitHub's refs/pull/*, which are
 # never pushed back and would inflate every count with closed-PR commits.
-BEFORE_COUNT="$(git -C "$MIRROR" rev-list --branches --count)"
+BEFORE_COUNT="$(git -C "$MIRROR" rev-list --branches --tags --count)"
 # The gate exits 1 on a tainted history — expected here — and `pipefail`
 # would turn that into a pipeline failure, so capture first, parse after.
 BEFORE_OUT="$(cd "$MIRROR" && GITHUB_STEP_SUMMARY=/dev/null PC_MAX_REPORT=0 PC_AUTHORS="$AUTHORS" bash "$SCRIPT_DIR/post-commit.sh" --branches 2>&1 || true)"
@@ -79,8 +79,12 @@ BEFORE_TAINT="$(printf '%s' "$BEFORE_OUT" | grep -oE '^::error::[0-9]+ tainted' 
 # just as much a reason to rewrite.
 BEFORE_IDENT="$(printf '%s' "$BEFORE_OUT" | grep -oE '^::error::[0-9]+ commit\(s\) not authored' | grep -oE '[0-9]+' || true)"
 : "${BEFORE_IDENT:=0}"
+# And trailers separately again: a history can carry an allowed author on every
+# commit and still name a personal address in a Co-authored-by line.
+BEFORE_TRAIL="$(printf '%s' "$BEFORE_OUT" | grep -oE '^::error::[0-9]+ commit\(s\) carry a trailer' | grep -oE '[0-9]+' || true)"
+: "${BEFORE_TRAIL:=0}"
 
-if [ "$BEFORE_TAINT" -eq 0 ] && [ "$BEFORE_IDENT" -eq 0 ]; then
+if [ "$BEFORE_TAINT" -eq 0 ] && [ "$BEFORE_IDENT" -eq 0 ] && [ "$BEFORE_TRAIL" -eq 0 ]; then
     echo "  $REPO: history already clean on every branch — nothing to rewrite."
     exit 0
 fi
@@ -100,6 +104,25 @@ done
 ALLOWED_RE="${ALLOWED_RE#|}"
 ALLOWED_RE="${ALLOWED_RE}|<noreply@github\.com>$|<[0-9]+\+[^@]+\[bot\]@users\.noreply\.github\.com>$"
 
+# The same allow-list, as a bare email regex: the message callback needs it to
+# decide whether a Co-authored-by / Signed-off-by trailer may stay. Written to
+# a file rather than interpolated, so no quoting of the regex survives into
+# Python source.
+ALLOWED_EMAIL_RE=""
+for login in ${AUTHORS//,/ }; do
+    esc="$(printf '%s' "$login" | sed 's/[][\\.^$*+?(){}|]/\\&/g')"
+    ALLOWED_EMAIL_RE="${ALLOWED_EMAIL_RE}|^([0-9]+\+)?${esc}@users\.noreply\.github\.com$"
+done
+ALLOWED_EMAIL_RE="${ALLOWED_EMAIL_RE#|}"
+ALLOWED_EMAIL_RE="${ALLOWED_EMAIL_RE}|^noreply@github\.com$|^[0-9]+\+[^@]+\[bot\]@users\.noreply\.github\.com$"
+for entry in ${REMAP[@]+"${REMAP[@]}"}; do
+    tgt="${entry#*=}"; tgt="${tgt##*<}"; tgt="${tgt%>}"
+    esc="$(printf '%s' "$tgt" | sed 's/[][\\.^$*+?(){}|]/\\&/g')"
+    ALLOWED_EMAIL_RE="${ALLOWED_EMAIL_RE}|^${esc}$"
+done
+ALLOWED_RE_FILE="$WORK/allowed.re"
+printf '%s' "$ALLOWED_EMAIL_RE" > "$ALLOWED_RE_FILE"
+
 MAILMAP="$WORK/mailmap"
 : > "$MAILMAP"
 
@@ -117,7 +140,9 @@ for entry in ${REMAP[@]+"${REMAP[@]}"}; do
 done
 REMAP_RE="${REMAP_RE#|}"
 
-git -C "$MIRROR" log --branches --format='%an <%ae>%n%cn <%ce>' | sort -u \
+# --branches --tags, not --branches: a tag can hold commits no branch reaches,
+# and an identity that only appears there would survive the rewrite untouched.
+git -C "$MIRROR" log --branches --tags --format='%an <%ae>%n%cn <%ce>' | sort -u \
     | grep -viE -- "$ALLOWED_RE" \
     | { [ -n "$REMAP_RE" ] && grep -viE -- "$REMAP_RE" || cat; } \
     | while IFS= read -r id; do printf '%s %s\n' "$IDENTITY" "$id"; done >> "$MAILMAP"
@@ -136,14 +161,38 @@ ATTR = re.compile(
     rb'|\b(written|authored|generated)\s+by\s+an?\s+(ai|llm|language\s+model)\b'
     rb'|^\s*plan:\s')
 ROBOT = '🤖'.encode()
+
+# An identity trailer carries an address as durably as the author field, so
+# the same allow-list decides it. A trailer naming an account that is not
+# allowed is dropped whole: rewriting it to someone else would invent a
+# co-author, and keeping it leaves the address in the history for good.
+TRAILER = re.compile(
+    rb'(?i)^\s*(co-authored-by|signed-off-by|authored-by|committed-by'
+    rb'|assisted-by|reviewed-by|acked-by|tested-by|reported-by|suggested-by)\s*:')
+EMAIL = re.compile(rb'<([^>]*)>')
+with open('__ALLOWED_RE_PATH__', 'rb') as fh:
+    ALLOWED = re.compile(fh.read().strip(), re.I)
+
+def foreign_trailer(l):
+    if not TRAILER.match(l):
+        return False
+    body = l.split(b':', 1)[1]
+    name = body.split(b'<')[0].strip()
+    if name.lower().endswith(b'[bot]'):
+        return False
+    m = EMAIL.search(l)
+    if not m:
+        return True
+    return not ALLOWED.search(m.group(1).strip())
+
 lines = message.split(b'\n')
 # Strict no-op on a clean message: whitespace normalisation alone must not
 # rewrite a commit, or every untainted commit gets a new SHA for nothing.
-if not any(ATTR.search(l) or ROBOT in l for l in lines):
+if not any(ATTR.search(l) or ROBOT in l or foreign_trailer(l) for l in lines):
     return message
 subject = lines[0].replace(ROBOT, b'')
 subject = re.sub(rb'(?i)\s*[\(\[]?\bai[-\s]?assisted[\)\]]?', b'', subject).rstrip()
-body = [l for l in lines[1:] if not (ATTR.search(l) or ROBOT in l)]
+body = [l for l in lines[1:] if not (ATTR.search(l) or ROBOT in l or foreign_trailer(l))]
 while body and not body[-1].strip():
     body.pop()
 out = []
@@ -156,12 +205,14 @@ while out and not out[0].strip():
 return subject + (b'\n\n' + b'\n'.join(out) if out else b'') + b'\n'
 PY
 
+sed -i "s|__ALLOWED_RE_PATH__|$ALLOWED_RE_FILE|" "$CALLBACK"
+
 echo "▸ rewriting messages and identities ($ID_COUNT foreign identit$([ "$ID_COUNT" = 1 ] && echo y || echo ies) → $IDENTITY)"
 ( cd "$MIRROR" && git filter-repo --quiet --force --mailmap "$MAILMAP" \
       --message-callback "$(cat "$CALLBACK")" ) >"$WORK/filter-repo.log" 2>&1 \
     || { echo "filter-repo failed:" >&2; cat "$WORK/filter-repo.log" >&2; exit 1; }
 
-AFTER_COUNT="$(git -C "$MIRROR" rev-list --branches --count)"
+AFTER_COUNT="$(git -C "$MIRROR" rev-list --branches --tags --count)"
 # commit-map has a header line ("old new"); skip it.
 CHANGED="$(awk 'NR>1 && $1!=$2' "$MIRROR/filter-repo/commit-map" 2>/dev/null | wc -l | tr -d ' ')"
 
@@ -178,6 +229,7 @@ echo "════════════════════════�
 echo "  commits          : $BEFORE_COUNT → $AFTER_COUNT (count unchanged by design)"
 echo "  tainted before   : $BEFORE_TAINT"
 echo "  foreign identity : $BEFORE_IDENT commit(s)"
+echo "  foreign trailers : $BEFORE_TRAIL commit(s)"
 echo "  commits rewritten: $CHANGED (new SHA)"
 echo "  identities mapped: $ID_COUNT"
 [ "$ID_COUNT" -gt 0 ] && sed 's/^/      /' "$MAILMAP"

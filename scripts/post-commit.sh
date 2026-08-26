@@ -11,14 +11,21 @@
 #   1. identity    — every commit's author AND committer is one of the allowed
 #                    accounts (PC_AUTHORS). A repository's history must carry
 #                    the owning GitHub account, not a personal identity.
-#   2. attribution — no AI attribution in ANY commit reachable from the head
+#   2. trailers    — every identity trailer (Co-authored-by, Signed-off-by, …)
+#                    names an allowed account too. The author/committer fields
+#                    are not the only place an identity lands: a trailer body
+#                    carries one just as durably, and a personal address there
+#                    is the same leak. Structural on purpose — it never names
+#                    a person, so this public repo stays free of the addresses
+#                    it exists to keep out of histories.
+#   3. attribution — no AI attribution in ANY commit reachable from the head
 #                    (PC_HISTORY=full, the default) or in the range only
 #                    (PC_HISTORY=range). Also inspects author AND committer
 #                    identity: a commit authored as "Claude <noreply@…>"
 #                    carries no trailer at all.
-#   3. format      — conventional-commit subject on the range's non-merge
+#   4. format      — conventional-commit subject on the range's non-merge
 #                    commits (project convention, see devcontainer-template).
-#   4. secrets     — no credential-shaped ADDED lines in the range's diff.
+#   5. secrets     — no credential-shaped ADDED lines in the range's diff.
 #
 # Deliberately NOT here: lint/build/test. Every repo's own CI already runs
 # those server-side, so --no-verify never bypassed them in the first place.
@@ -94,16 +101,33 @@ if [ -n "$AUTHORS" ]; then
 fi
 
 ATTR_FILE="$(mktemp)"; FMT_FILE="$(mktemp)"; SEC_FILE="$(mktemp)"; IDENT_FILE="$(mktemp)"
-trap 'rm -f "$ATTR_FILE" "$FMT_FILE" "$SEC_FILE" "$IDENT_FILE"' EXIT
-ATTR_N=0; ATTR_SCANNED=0; FMT_N=0; FMT_SCANNED=0; SEC_N=0; IDENT_N=0
+TRAIL_FILE="$(mktemp)"
+trap 'rm -f "$ATTR_FILE" "$FMT_FILE" "$SEC_FILE" "$IDENT_FILE" "$TRAIL_FILE"' EXIT
+ATTR_N=0; ATTR_SCANNED=0; FMT_N=0; FMT_SCANNED=0; SEC_N=0; IDENT_N=0; TRAIL_N=0
+
+# Identity trailers, whatever the case. An address here is as permanent as the
+# author field, so the same allow-list applies to both. Accounts whose display
+# name ends in "[bot]" are exempt: dependabot signs off as
+# `<support@github.com>`, which no allow-list of human logins can express.
+TRAILER_RE='^[[:space:]]*(co-authored-by|signed-off-by|authored-by|committed-by|assisted-by|reviewed-by|acked-by|tested-by|reported-by|suggested-by)[[:space:]]*:'
+
 
 # --- 1. Attribution ---------------------------------------------------------
 # %x1f separates fields, %x1e ends the record: a body is arbitrary multi-line
 # text, so a line-oriented read would split it. The record separator keeps
 # each message whole whatever it contains.
-if [ "$HISTORY" = "full" ]; then ATTR_SCOPE="$HEAD_REV"; else ATTR_SCOPE="$RANGE"; fi
+# `--branches` is the whole-repository audit (rewrite-history.sh); it must
+# cover tags too. A tag can hold commits no branch reaches any more — 171 of
+# them on one fleet repo, carrying a personal identity that every
+# branch-only scan called clean. In CI the scope is a SHA and unaffected.
+if [ "$HISTORY" = "full" ]; then
+    if [ "$HEAD_REV" = "--branches" ]; then SCOPE_ARGS=(--branches --tags); else SCOPE_ARGS=("$HEAD_REV"); fi
+else
+    SCOPE_ARGS=("$RANGE")
+fi
+ATTR_SCOPE="${SCOPE_ARGS[*]}"
 
-RAW="$(git log "$ATTR_SCOPE" --format='%H%x1f%an%x1f%ae%x1f%cn%x1f%ce%x1f%s%x1f%B%x1e' 2>/dev/null)" || {
+RAW="$(git log "${SCOPE_ARGS[@]}" --format='%H%x1f%an%x1f%ae%x1f%cn%x1f%ce%x1f%s%x1f%B%x1e' 2>/dev/null)" || {
     echo "::error::git log failed for '$ATTR_SCOPE' — shallow checkout? (needs fetch-depth: 0)" >&2
     exit 2
 }
@@ -129,6 +153,22 @@ while IFS= read -r -d $'\x1e' REC; do
         if [ -n "$BAD" ]; then
             IDENT_N=$((IDENT_N + 1))
             [ "$IDENT_N" -le "$MAX_REPORT" ] && printf '%s\t%s\t%s\n' "$SHA" "$SUBJ" "$BAD" >> "$IDENT_FILE"
+        fi
+    fi
+
+    if [ -n "$IDENT_RE" ]; then
+        BADT=""
+        while IFS= read -r TL; do
+            [ -n "$TL" ] || continue
+            TEMAIL="$(printf '%s' "$TL" | sed -n 's/.*<\([^>]*\)>.*/\1/p')"
+            TNAME="$(printf '%s' "$TL" | sed -n 's/^[^:]*:[[:space:]]*\(.*\)<.*/\1/p' | sed 's/[[:space:]]*$//')"
+            printf '%s' "$TNAME" | grep -qiE '\[bot\]$' && continue
+            [ -n "$TEMAIL" ] && printf '%s' "$TEMAIL" | grep -qiE -- "$IDENT_RE" && continue
+            BADT="${BADT:+$BADT; }$(printf '%s' "$TL" | sed 's/^[[:space:]]*//' | cut -c1-100)"
+        done < <(printf '%s' "$BODY" | grep -iE -- "$TRAILER_RE" 2>/dev/null)
+        if [ -n "$BADT" ]; then
+            TRAIL_N=$((TRAIL_N + 1))
+            [ "$TRAIL_N" -le "$MAX_REPORT" ] && printf '%s\t%s\t%s\n' "$SHA" "$SUBJ" "$BADT" >> "$TRAIL_FILE"
         fi
     fi
 
@@ -200,8 +240,24 @@ esc() { printf '%s' "$1" | sed 's/|/\\|/g; s/`/ʼ/g'; }
     fi
     [ -n "$RANGE" ] && echo "Format: **$FMT_SCANNED** non-merge commit(s) in \`$RANGE\`. Secrets: added lines in \`$RANGE\`."
     echo ""
-    if [ "$ATTR_N" -eq 0 ] && [ "$FMT_N" -eq 0 ] && [ "$SEC_N" -eq 0 ] && [ "$IDENT_N" -eq 0 ]; then
+    if [ "$ATTR_N" -eq 0 ] && [ "$FMT_N" -eq 0 ] && [ "$SEC_N" -eq 0 ] && [ "$IDENT_N" -eq 0 ] && [ "$TRAIL_N" -eq 0 ]; then
         echo "✅ Clean — allowed identities, no AI attribution, conventional subjects, no credentials added."
+    fi
+    if [ "$TRAIL_N" -gt 0 ]; then
+        echo "### ❌ Foreign identity in a trailer — $TRAIL_N commit(s)"
+        echo ""
+        echo "A \`Co-authored-by:\` or \`Signed-off-by:\` line carries an identity as"
+        echo "permanently as the author field. Allowed: \`${AUTHORS}\` (GitHub noreply"
+        echo "addresses), plus app/bot accounts."
+        echo ""
+        echo "| Commit | Subject | Trailer |"
+        echo "|---|---|---|"
+        while IFS=$'\t' read -r sha subj who; do
+            printf '| `%s` | %s | %s |\n' "${sha:0:8}" "$(esc "$subj")" "$(esc "$who")"
+        done < "$TRAIL_FILE"
+        [ "$TRAIL_N" -gt "$MAX_REPORT" ] && echo "" && echo "_… and $((TRAIL_N - MAX_REPORT)) more._"
+        [ "$HISTORY" = "full" ] && echo "" && echo "> Existing commits need \`scripts/rewrite-history.sh\`."
+        echo ""
     fi
     if [ "$IDENT_N" -gt 0 ]; then
         echo "### ❌ Foreign identity — $IDENT_N commit(s)"
@@ -264,6 +320,13 @@ if [ "$IDENT_N" -gt 0 ]; then
         echo "::error::foreign identity in ${sha:0:8} (${subj}) — ${who}"
     done < "$IDENT_FILE"
     echo "::error::$IDENT_N commit(s) not authored by an allowed account (${AUTHORS})"
+fi
+if [ "$TRAIL_N" -gt 0 ]; then
+    RC=1
+    while IFS=$'\t' read -r sha subj who; do
+        echo "::error::foreign identity in a trailer of ${sha:0:8} (${subj}) — ${who}"
+    done < "$TRAIL_FILE"
+    echo "::error::$TRAIL_N commit(s) carry a trailer identity outside the allowed accounts (${AUTHORS})"
 fi
 if [ "$ATTR_N" -gt 0 ]; then
     RC=1
