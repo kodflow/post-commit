@@ -68,6 +68,13 @@ done
 [ "${#TARGETS[@]}" -gt 0 ] || { echo "usage: enforce.sh [--apply] [--audit] [--report FILE] (--all | owner/repo ...)" >&2; exit 2; }
 [ -r "$STUB_FILE" ] || { echo "stub not found: $STUB_FILE" >&2; exit 2; }
 STUB_B64="$(base64 -w0 < "$STUB_FILE")"
+STUB_BLOB="$(git hash-object "$STUB_FILE")"
+SYNC_BODY='The gate workflow in this repository has drifted from the central stub in
+[kodflow/post-commit](https://github.com/kodflow/post-commit/blob/main/stub/post-commit.yml).
+\nThe rules themselves live in the action and are pinned to `@main`, so they were
+already current here. What was not is everything the stub itself carries — the
+inputs it passes, and the jobs that react to a verdict.\n\nThis replaces the file
+with the central copy verbatim. Nothing in it is repository-specific.'
 
 ruleset_payload() {
     jq -n --arg name "$RULESET_NAME" --argjson app "$GITHUB_ACTIONS_APP_ID" '{
@@ -91,24 +98,57 @@ ensure_stub() {   # -> sets STUB_STATE, PR_URL
     # post-commit) so the version under review is the one that runs; a stub
     # pinned to @main would test the wrong code. The ruleset still applies.
     if [ "$repo" = "$SELF_REPO" ]; then STUB_STATE="self"; return; fi
-    if gh api "repos/$repo/contents/$STUB_PATH?ref=$db" --jq .sha >/dev/null 2>&1; then
+    # The deployed blob's sha IS a git blob sha, so comparing it with
+    # `git hash-object` on our copy is an exact content check for one API call
+    # — no download, no normalising base64 line wrapping. Without this the stub
+    # was only ever checked for existence, so every later change to it (the
+    # identity input, the pull-request comment) sat undeployed on a fleet that
+    # reported itself complete.
+    local deployed verb title
+    deployed="$(gh api "repos/$repo/contents/$STUB_PATH?ref=$db" --jq .sha 2>/dev/null)"
+    if [ -n "$deployed" ] && [ "$deployed" = "$STUB_BLOB" ]; then
         STUB_STATE="present"; return
     fi
+    if [ -n "$deployed" ]; then verb=sync; else verb=add; fi
+
     for b in "$BRANCH" "${LEGACY_BRANCHES[@]}"; do
         PR_URL="$(gh pr list --repo "$repo" --head "$b" --state open --json url --jq '.[0].url // empty' 2>/dev/null)"
         [ -n "$PR_URL" ] && { STUB_STATE="pr-open"; return; }
     done
-    $APPLY || { STUB_STATE="would-open-pr"; return; }
+    if ! $APPLY; then
+        [ "$verb" = sync ] && STUB_STATE="stale:would-sync" || STUB_STATE="would-open-pr"
+        return
+    fi
+
     sha="$(gh api "repos/$repo/git/ref/heads/$db" --jq .object.sha 2>/dev/null)" || { STUB_STATE="error:no-sha"; return; }
     gh api "repos/$repo/git/refs" -X POST -f ref="refs/heads/$BRANCH" -f sha="$sha" >/dev/null 2>&1 \
         || gh api "repos/$repo/git/refs/heads/$BRANCH" >/dev/null 2>&1 \
         || { STUB_STATE="error:branch"; return; }
-    out="$(gh api "repos/$repo/contents/$STUB_PATH" -X PUT -f message="ci: add the mandatory post-commit gate" \
-            -f content="$STUB_B64" -f branch="$BRANCH" 2>&1)" || { STUB_STATE="error:put:${out:0:60}"; return; }
-    PR_URL="$(gh pr create --repo "$repo" --base "$db" --head "$BRANCH" \
-        --title "ci: add the mandatory post-commit gate" \
-        --body-file "$SCRIPT_DIR/../stub/pr-body.md" 2>&1 | grep -oE 'https://[^ ]+' | head -1)"
-    [ -n "$PR_URL" ] && STUB_STATE="pr-created" || STUB_STATE="error:pr"
+
+    # Updating an existing file needs the blob sha it is replacing, and the one
+    # on the branch is not always the one on the default branch.
+    local onbranch args=()
+    onbranch="$(gh api "repos/$repo/contents/$STUB_PATH?ref=$BRANCH" --jq .sha 2>/dev/null)"
+    [ -n "$onbranch" ] && args=(-f "sha=$onbranch")
+
+    if [ "$verb" = sync ]; then
+        title="ci(post-commit): sync the gate workflow with the central stub"
+    else
+        title="ci: add the mandatory post-commit gate"
+    fi
+    out="$(gh api "repos/$repo/contents/$STUB_PATH" -X PUT -f message="$title" \
+            -f content="$STUB_B64" -f branch="$BRANCH" "${args[@]}" 2>&1)" \
+        || { STUB_STATE="error:put:${out:0:60}"; return; }
+
+    if [ "$verb" = sync ]; then
+        PR_URL="$(gh pr create --repo "$repo" --base "$db" --head "$BRANCH" --title "$title" \
+            --body "$SYNC_BODY" 2>&1 | grep -oE 'https://[^ ]+' | head -1)"
+        [ -n "$PR_URL" ] && STUB_STATE="sync-created" || STUB_STATE="error:pr"
+    else
+        PR_URL="$(gh pr create --repo "$repo" --base "$db" --head "$BRANCH" --title "$title" \
+            --body-file "$SCRIPT_DIR/../stub/pr-body.md" 2>&1 | grep -oE 'https://[^ ]+' | head -1)"
+        [ -n "$PR_URL" ] && STUB_STATE="pr-created" || STUB_STATE="error:pr"
+    fi
 }
 
 ensure_rule() {   # -> sets RULE_STATE
@@ -194,7 +234,7 @@ for repo in "${TARGETS[@]}"; do
     # repository — dependabot bumps included — until the stub PR merges.
     # devcontainer-template spent a day in exactly that state.
     case "$STUB_STATE" in
-        present|self) ensure_rule "$repo" ;;
+        present|self|stale:*|sync-created) ensure_rule "$repo" ;;
         *)            RULE_STATE="deferred:stub-not-merged" ;;
     esac
     ROWS+=("$repo"$'\t'"$db"$'\t'"$STUB_STATE"$'\t'"$RULE_STATE"$'\t'"$PR_URL")
