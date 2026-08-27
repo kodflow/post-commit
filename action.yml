@@ -38,15 +38,6 @@ inputs:
   token:
     description: Token used to check out the calling repository.
     default: ${{ github.token }}
-  draft_on_failure:
-    description: >-
-      On a failed pull_request run, put the pull request back into draft.
-      A red status only blocks a merge where a ruleset can require it, and
-      GitHub refuses rulesets outright on a private repository in a Free-plan
-      organisation — there the gate reports and nothing stops the merge. Draft
-      state has no such hole: GitHub declines to merge a draft on every plan,
-      and declines it to repository admins too. Needs `pull-requests: write`
-      in the calling workflow.
 
 runs:
   using: composite
@@ -106,21 +97,3 @@ runs:
         PC_FORMAT: ${{ inputs.format }}
         PC_SECRETS: ${{ inputs.secrets }}
       run: bash "${{ github.action_path }}/scripts/post-commit.sh" "${{ steps.rev.outputs.head }}" "${{ steps.rev.outputs.range }}"
-
-    # The block of last resort. Where the ruleset exists this changes nothing —
-    # the required status already refuses the merge. Where GitHub will not let
-    # a ruleset exist, this is the only refusal available, and the caller has
-    # to mark the pull request ready again to try, which re-runs the gate.
-    - name: Draft the pull request
-      if: ${{ failure() && inputs.draft_on_failure == 'true' && github.event_name == 'pull_request' && github.event.pull_request.draft == false }}
-      shell: bash
-      env:
-        GH_TOKEN: ${{ inputs.token }}
-        PR: ${{ github.event.pull_request.number }}
-        REPO: ${{ github.repository }}
-      run: |
-        if gh pr ready --undo "$PR" -R "$REPO" 2>/dev/null; then
-            echo "::notice::gate failed — pull request put back into draft. Fix the history, then mark it ready: that re-runs this gate."
-        else
-            echo "::warning::gate failed but the pull request could not be drafted. Add \`pull-requests: write\` to this workflow's permissions, or the merge is only advised against, not refused."
-        fi
