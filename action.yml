@@ -39,6 +39,17 @@ inputs:
     description: Token used to check out the calling repository.
     default: ${{ github.token }}
 
+outputs:
+  passed:
+    description: '"true" when the gate found nothing, "false" otherwise.'
+    value: ${{ steps.gate.outputs.passed }}
+  report:
+    description: >-
+      The verdict as markdown — the same text the job summary carries. A
+      caller can post it where the author will see it. Capped at 60 kB, which
+      is well under the pull-request comment limit.
+    value: ${{ steps.gate.outputs.report }}
+
 runs:
   using: composite
   steps:
@@ -113,7 +124,12 @@ runs:
         echo "range=$RANGE" >> "$GITHUB_OUTPUT"
         echo "head=$HEAD range=${RANGE:-<none>}"
 
+    # The gate runs here and always exits 0; the verdict is a separate step.
+    # A composite step that fails takes its outputs down with it, and the
+    # whole point of `report` is to be readable BY the job that reacts to a
+    # failure. Splitting keeps the failure exact and the report available.
     - name: post-commit
+      id: gate
       shell: bash
       env:
         PC_AUTHORS: ${{ inputs.authors }}
@@ -121,4 +137,29 @@ runs:
         PC_HISTORY: ${{ inputs.history }}
         PC_FORMAT: ${{ inputs.format }}
         PC_SECRETS: ${{ inputs.secrets }}
-      run: bash "${{ github.action_path }}/scripts/post-commit.sh" "${{ steps.rev.outputs.head }}" "${{ steps.rev.outputs.range }}"
+        PC_REPORT: ${{ runner.temp }}/post-commit-report.md
+      run: |
+        rc=0
+        bash "${{ github.action_path }}/scripts/post-commit.sh" \
+          "${{ steps.rev.outputs.head }}" "${{ steps.rev.outputs.range }}" || rc=$?
+        if [ "$rc" -eq 0 ]; then echo "passed=true" >> "$GITHUB_OUTPUT"
+        else echo "passed=false" >> "$GITHUB_OUTPUT"; fi
+        # A random delimiter: the report is arbitrary markdown built from commit
+        # subjects, so a fixed sentinel is a line an author could write.
+        D="PCEOF_${RANDOM}${RANDOM}"
+        {
+          echo "report<<$D"
+          head -c 60000 "$PC_REPORT" 2>/dev/null || true
+          echo ""
+          echo "$D"
+        } >> "$GITHUB_OUTPUT"
+        # A usage or internal error (exit 2) is not a verdict — fail here and
+        # now rather than let the verdict step read it as a mere violation.
+        [ "$rc" -le 1 ] || exit "$rc"
+
+    - name: verdict
+      shell: bash
+      run: |
+        [ "${{ steps.gate.outputs.passed }}" = "true" ] && exit 0
+        echo "::error::post-commit refused this history — see the job summary."
+        exit 1

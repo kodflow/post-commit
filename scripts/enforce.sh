@@ -139,11 +139,14 @@ ensure_rule() {   # -> sets RULE_STATE
 # status can run but can never be required. Both cases print here.
 if $AUDIT; then
     printf '%-40s %-8s %-10s %-12s %s\n' REPOSITORY VISIBLE WORKFLOW REQUIRED BYPASS
-    ok=0; total=0
+    ok=0; advisory=0; total=0
     for repo in "${TARGETS[@]}"; do
-        total=$((total + 1))
         db="$(gh repo view "$repo" --json defaultBranchRef --jq '.defaultBranchRef.name // empty' 2>/dev/null)"
+        # An empty repository is listed but not counted: there is no history to
+        # gate and no default branch to attach a ruleset to, so scoring it as a
+        # gap invents work that does not exist.
         [ -n "$db" ] || { printf '%-40s %-8s %-10s %-12s %s\n' "$repo" - empty - -; continue; }
+        total=$((total + 1))
         vis="$(gh api "repos/$repo" --jq 'if .private then "private" else "public" end' 2>/dev/null)"
         if gh api "repos/$repo/contents/$STUB_PATH?ref=$db" --jq .content >/dev/null 2>&1 \
            || [ "$repo" = "$SELF_REPO" ]; then wf=yes; else wf=NO; fi
@@ -159,11 +162,24 @@ if $AUDIT; then
                 [ "$byp" = "0" ] || byp="$byp BYPASSABLE"
             fi
         fi
-        [ "$wf" = yes ] && [ "$req" = yes ] && [ "$byp" = "0" ] && ok=$((ok + 1))
+        # Three outcomes, not two. A repository GitHub refuses a ruleset on is
+        # not the same failure as one where nobody created it: the first is a
+        # plan limit with nothing left to do here, the second is a gap someone
+        # can close in a command. Counting them together turns a permanent,
+        # understood limit into noise that hides the real gaps.
+        if [ "$wf" = yes ] && [ "$req" = yes ] && [ "$byp" = "0" ]; then
+            ok=$((ok + 1))
+        elif [ "$wf" = yes ] && [ "$req" = unavailable ]; then
+            advisory=$((advisory + 1))
+        fi
         printf '%-40s %-8s %-10s %-12s %s\n' "$repo" "$vis" "$wf" "$req" "$byp"
     done
     echo ""
+    gaps=$((total - ok - advisory))
     echo "enforced: $ok / $total"
+    [ "$advisory" -gt 0 ] && echo "advisory: $advisory (private repo in a Free-plan org — GitHub allows no ruleset; the gate runs and comments, nothing blocks the merge)"
+    [ "$gaps" -gt 0 ] && echo "gaps:     $gaps (missing workflow, missing ruleset, or a ruleset with bypass actors)"
+    :
     exit 0
 fi
 

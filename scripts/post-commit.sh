@@ -49,6 +49,11 @@ FORMAT="${PC_FORMAT:-true}"
 AUTHORS="${PC_AUTHORS:-}"
 MAX_REPORT="${PC_MAX_REPORT:-50}"
 SUMMARY="${GITHUB_STEP_SUMMARY:-/dev/null}"
+# Second sink for the same markdown. The job summary is only read by
+# someone who opens the run; a caller that wants the verdict where the
+# author will actually see it — a pull-request comment — points
+# PC_REPORT at a file and reads it back.
+REPORT="${PC_REPORT:-}"
 
 if [ -z "$HEAD_REV" ]; then
     echo "usage: post-commit.sh <head-rev> [<range>]" >&2
@@ -101,8 +106,8 @@ if [ -n "$AUTHORS" ]; then
 fi
 
 ATTR_FILE="$(mktemp)"; FMT_FILE="$(mktemp)"; SEC_FILE="$(mktemp)"; IDENT_FILE="$(mktemp)"
-TRAIL_FILE="$(mktemp)"
-trap 'rm -f "$ATTR_FILE" "$FMT_FILE" "$SEC_FILE" "$IDENT_FILE" "$TRAIL_FILE"' EXIT
+TRAIL_FILE="$(mktemp)"; REPORT_BODY="$(mktemp)"
+trap 'rm -f "$ATTR_FILE" "$FMT_FILE" "$SEC_FILE" "$IDENT_FILE" "$TRAIL_FILE" "$REPORT_BODY"' EXIT
 ATTR_N=0; ATTR_SCANNED=0; FMT_N=0; FMT_SCANNED=0; SEC_N=0; IDENT_N=0; TRAIL_N=0
 
 # Identity trailers, whatever the case. An address here is as permanent as the
@@ -320,7 +325,9 @@ esc() { printf '%s' "$1" | sed 's/|/\\|/g; s/`/ʼ/g'; }
         while IFS= read -r l; do printf -- '- `%s…`\n' "$(printf '%s' "$l" | cut -c1-40 | tr -d '`')"; done < "$SEC_FILE"
         echo ""
     fi
-} >> "$SUMMARY"
+} > "$REPORT_BODY"
+cat "$REPORT_BODY" >> "$SUMMARY"
+[ -n "$REPORT" ] && cp "$REPORT_BODY" "$REPORT"
 
 RC=0
 if [ "$IDENT_N" -gt 0 ]; then
