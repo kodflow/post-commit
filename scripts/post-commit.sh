@@ -121,7 +121,16 @@ TRAILER_RE='^[[:space:]]*(co-authored-by|signed-off-by|authored-by|committed-by|
 # them on one fleet repo, carrying a personal identity that every
 # branch-only scan called clean. In CI the scope is a SHA and unaffected.
 if [ "$HISTORY" = "full" ]; then
-    if [ "$HEAD_REV" = "--branches" ]; then SCOPE_ARGS=(--branches --tags); else SCOPE_ARGS=("$HEAD_REV"); fi
+    if [ "$HEAD_REV" = "--branches" ]; then
+        # --remotes as well as --branches: a mirror keeps branches in
+        # refs/heads, but an actions/checkout working copy has exactly one
+        # local branch and puts the rest under refs/remotes/origin. Asking for
+        # both makes the same invocation mean "everything this clone knows"
+        # in either shape; the unused half is simply empty.
+        SCOPE_ARGS=(--branches --tags --remotes)
+    else
+        SCOPE_ARGS=("$HEAD_REV")
+    fi
 else
     SCOPE_ARGS=("$RANGE")
 fi

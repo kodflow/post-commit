@@ -50,6 +50,11 @@ runs:
       uses: actions/checkout@v7
       with:
         fetch-depth: 0
+        # Tags are not optional here: the push and manual paths scan every
+        # branch AND every tag, and checkout does not bring tags along on its
+        # own. Without this the whole-repository scan would quietly cover less
+        # than it claims.
+        fetch-tags: true
         ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
         token: ${{ inputs.token }}
         persist-credentials: false
@@ -68,6 +73,26 @@ runs:
         if [ "$EVENT" = "pull_request" ] || [ "$EVENT" = "pull_request_target" ]; then
           HEAD="$PR_HEAD"
           RANGE="${PR_BASE}..${PR_HEAD}"
+        elif [ "$EVENT" = "push" ] || [ "$EVENT" = "workflow_dispatch" ] || [ "$EVENT" = "schedule" ]; then
+          # Not the pushed commit: every branch and every tag.
+          #
+          # A pull request is judged on its own ancestry, which is the right
+          # scope for a merge decision and keeps it fast. But that scope never
+          # sees a tag. A tag can hold commits no branch reaches any more —
+          # 171 of them on one fleet repo, carrying a personal identity that
+          # every branch-only scan had called clean — and nothing would ever
+          # report them, because no pull request walks there.
+          #
+          # Push and manual runs are not deciding a merge, so they can afford
+          # the whole repository. Format and secrets stay on the range: they
+          # are about what a change introduces, not what the archive holds.
+          HEAD="--branches"
+          RANGE=""
+          echo "::notice::whole-repository scan: every branch and every tag"
+          echo "head=$HEAD" >> "$GITHUB_OUTPUT"
+          echo "range=$RANGE" >> "$GITHUB_OUTPUT"
+          echo "head=$HEAD range=<none>"
+          exit 0
         else
           HEAD="$SHA"
           # github.event.before is all-zeros for a new branch and points at an
