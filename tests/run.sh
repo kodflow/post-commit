@@ -265,6 +265,42 @@ out="$(cd "$d" && env GITHUB_STEP_SUMMARY=/dev/null PC_AUTHORS=kodflow bash "$GA
 if [ "$rc" -eq 1 ]; then PASS=$((PASS+1)); printf '  ok   %s\n' "a commit only a tag reaches is still scanned"
 else FAIL=$((FAIL+1)); printf '  FAIL %s (want exit 1, got %s)\n' "a commit only a tag reaches is still scanned" "$rc"; fi
 
+echo "== report sink =="
+# PC_REPORT is what puts the verdict in a pull-request comment. A caller reads
+# the file back, so an empty or missing one silently degrades the comment to
+# "no report" — worth a test rather than a hope.
+d=$(mkrepo); commit_msg "$d" "feat: clean"
+r="$(mktemp)"
+( cd "$d" && env GITHUB_STEP_SUMMARY=/dev/null PC_REPORT="$r" bash "$GATE" HEAD HEAD~1..HEAD ) >/dev/null 2>&1
+if grep -q '## post-commit' "$r" && grep -q 'Clean' "$r"; then
+    PASS=$((PASS+1)); printf '  ok   %s\n' "PC_REPORT holds the verdict of a clean run"
+else
+    FAIL=$((FAIL+1)); printf '  FAIL %s\n' "PC_REPORT holds the verdict of a clean run"
+fi
+rm -rf "$d" "$r"
+
+d=$(mkrepo); commit_msg "$d" "feat: thing
+
+Co-authored-by: Claude <noreply@anthropic.com>"
+r="$(mktemp)"
+( cd "$d" && env GITHUB_STEP_SUMMARY=/dev/null PC_REPORT="$r" bash "$GATE" HEAD HEAD~1..HEAD ) >/dev/null 2>&1
+if grep -q 'AI attribution' "$r"; then
+    PASS=$((PASS+1)); printf '  ok   %s\n' "PC_REPORT names the violation on a failing run"
+else
+    FAIL=$((FAIL+1)); printf '  FAIL %s\n' "PC_REPORT names the violation on a failing run"
+fi
+rm -rf "$d" "$r"
+
+d=$(mkrepo); commit_msg "$d" "feat: clean"
+( cd "$d" && env GITHUB_STEP_SUMMARY=/dev/null bash "$GATE" HEAD HEAD~1..HEAD ) >/dev/null 2>&1
+rc=$?
+if [ "$rc" -eq 0 ]; then
+    PASS=$((PASS+1)); printf '  ok   %s\n' "no PC_REPORT is not an error"
+else
+    FAIL=$((FAIL+1)); printf '  FAIL %s (exit %s)\n' "no PC_REPORT is not an error" "$rc"
+fi
+rm -rf "$d"
+
 echo "== format (expect 1) =="
 d=$(mkrepo); commit_msg "$d" "Update README.md"
 check "GitHub web-UI default subject" 1 "$d"

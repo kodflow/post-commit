@@ -26,6 +26,18 @@ rules exist but are opt-in (`strict: true`).
 **Deliberately not here: lint, build, test.** Every repository's own CI
 already runs those on GitHub, so `--no-verify` never bypassed them.
 
+### Outputs
+
+| Output | |
+|---|---|
+| `passed` | `"true"` when the gate found nothing, `"false"` otherwise |
+| `report` | the verdict as markdown — the same text the job summary carries, capped at 60 kB |
+
+`report` is what the stub posts on the pull request. The gate runs in a step
+that always exits 0 and a separate step carries the verdict, because a
+composite step that fails takes its outputs down with it — and the one job
+that needs the report is the one reacting to a failure.
+
 ### Who is allowed to commit
 
 `authors` takes GitHub **logins**, not addresses. Each expands to that
@@ -120,7 +132,17 @@ Idempotent: re-running never duplicates a PR or a ruleset.
 - **Private repositories in a Free organisation** have neither rulesets nor
   branch protection ("Upgrade to GitHub Pro or make this repository
   public"). The check still runs and goes red; nothing stops the merge.
-  `enforce.sh` reports these as `unavailable:plan`.
+  `enforce.sh` reports these as `unavailable:plan`, and `--audit` counts them
+  as **advisory** rather than as gaps — a limit GitHub imposes is not the same
+  defect as a ruleset nobody created, and scoring them together buries the
+  gaps that can actually be closed.
+
+  What is left there is visibility, so the gate spends it: on a failed run the
+  pull request gets a comment naming every violation and saying plainly that
+  **nothing will stop this merge**, with the two ways out (paid plan, or make
+  the repository public). One comment per pull request, rewritten in place.
+  The same comment on a repository that *does* carry the ruleset says so
+  instead — the reader never has to guess whether the red status has teeth.
 - A **repository admin** bypasses the ruleset. That is intended.
 - The gate sees commits after they exist. A direct push to the trunk without
   a passing `post-commit` status is rejected by the ruleset — but the commit
