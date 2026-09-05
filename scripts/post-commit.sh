@@ -55,7 +55,14 @@ HISTORY="${PC_HISTORY:-full}"
 FORMAT="${PC_FORMAT:-true}"
 AUTHORS="${PC_AUTHORS:-}"
 AGENT_FILES="${PC_AGENT_FILES:-true}"
-AGENT_ALLOW="${PC_AGENT_ALLOW:-}"
+# read -a, not an unquoted expansion. `for x in ${VAR//,/ }` word-splits AND
+# glob-expands, so an entry like `.claude/*` would be expanded against the
+# working tree before it is ever used as a pattern — and bash's filename
+# globbing skips leading dots, so `.claude/.mcp.json` would come out NOT
+# exempted while `.claude/settings.json` would. read does the splitting
+# without the expansion, leaving the entry to be matched as a pattern by
+# [[ == ]], where `*` does cross both `/` and a leading dot.
+IFS=', ' read -r -a AGENT_ALLOW <<< "${PC_AGENT_ALLOW:-}"
 MAX_REPORT="${PC_MAX_REPORT:-50}"
 SUMMARY="${GITHUB_STEP_SUMMARY:-/dev/null}"
 # Second sink for the same markdown. The job summary is only read by
@@ -131,7 +138,7 @@ ATTR_FILE="$(mktemp)"; FMT_FILE="$(mktemp)"; SEC_FILE="$(mktemp)"; IDENT_FILE="$
 TRAIL_FILE="$(mktemp)"; AGENT_FILE="$(mktemp)"; REPORT_BODY="$(mktemp)"
 trap 'rm -f "$ATTR_FILE" "$FMT_FILE" "$SEC_FILE" "$IDENT_FILE" "$TRAIL_FILE" "$AGENT_FILE" "$REPORT_BODY"' EXIT
 ATTR_N=0; ATTR_SCANNED=0; FMT_N=0; FMT_SCANNED=0; SEC_N=0; IDENT_N=0; TRAIL_N=0; AGENT_N=0
-AGENT_ROOTS=""; AGENT_ROOT_N=0
+AGENT_ROOT_N=0
 
 # Identity trailers, whatever the case. An address here is as permanent as the
 # author field, so the same allow-list applies to both. Accounts whose display
@@ -281,23 +288,35 @@ fi
 # rewrite-history.sh) and is not a tree-ish. There, the checked-out head is the
 # tree to judge — on push that is exactly the commit that was pushed.
 TREE_REV="$HEAD_REV"; [ "$TREE_REV" = "--branches" ] && TREE_REV=HEAD
+declare -A AGENT_ROOT_COUNT=()
+AGENT_ROOT_ORDER=()
 if [ "$AGENT_FILES" = "true" ]; then
     # One combined alternation rather than a grep per pattern: a large
     # repository has tens of thousands of tracked paths, and forty passes over
-    # them is forty times the work for the same answer. Nothing is lost by not
-    # recording which alternative fired — unlike a message match, the path is
-    # its own evidence.
+    # them is forty times the work for the same answer.
     AGENT_RE=""
     for pattern in "${AGENT_PATTERNS[@]}"; do AGENT_RE="${AGENT_RE}|(${pattern})"; done
     AGENT_RE="${AGENT_RE#|}"
-    TREE="$(git ls-tree -r --name-only "$TREE_REV" 2>/dev/null)" || {
-        echo "::error::git ls-tree failed for '$TREE_REV' — no such tree?" >&2
+
+    # -z, and NUL all the way through. Without it git C-quotes any path holding
+    # a non-ASCII or control character — `.claude/naïve.md` is emitted as
+    # `".claude/na\303\257ve.md"` — and the quote it adds sits exactly where
+    # `(^|/)` and `$` need a path boundary, so every pattern in agent-paths.txt
+    # stops matching. Measured before the fix: a repository whose `.claude/`
+    # files all carried an accent was reported clean. Naming files that way is
+    # a one-line evasion of the whole rule.
+    #
+    # The paths cannot pass through a shell variable on the way, because a bash
+    # string cannot hold a NUL. So the pipeline runs straight into the loop and
+    # the revision is verified separately rather than through git's exit status.
+    git rev-parse -q --verify "${TREE_REV}^{tree}" >/dev/null 2>&1 || {
+        echo "::error::no tree at '$TREE_REV' — shallow checkout? (needs fetch-depth: 0)" >&2
         exit 2
     }
-    while IFS= read -r p; do
+    while IFS= read -r -d '' p; do
         [ -z "$p" ] && continue
         ALLOWED=""
-        for allow in ${AGENT_ALLOW//,/ }; do
+        for allow in ${AGENT_ALLOW[@]+"${AGENT_ALLOW[@]}"}; do
             # A bare entry exempts the whole subtree, so `.claude` and
             # `.claude/*` both mean what whoever wrote the input expects. `*`
             # crosses `/` inside [[ == ]], so no globstar is involved.
@@ -306,46 +325,49 @@ if [ "$AGENT_FILES" = "true" ]; then
         done
         [ -n "$ALLOWED" ] && continue
         AGENT_N=$((AGENT_N + 1))
-        printf '%s\n' "$p" >> "$AGENT_FILE"
-    done < <(printf '%s\n' "$TREE" | grep -iE -- "$AGENT_RE")
-    # Every hit is recorded, uncapped, because the report does not show them
-    # one by one. A `.claude/` holding two hundred files is ONE thing to
-    # delete, not two hundred lines of verdict, so each path collapses to its
-    # artefact root and the roots are counted. MAX_REPORT then caps roots
-    # rather than files, which is what a reader was going to act on anyway.
-    # The per-file GitHub annotations below stay per-file: those anchor on the
-    # path and are read by a machine.
-    #
-    # The root is the SHORTEST PREFIX THAT STILL MATCHES, not the first
-    # dot-directory along the path, and the difference is not cosmetic. The
-    # fleet's devcontainer ships its agent configuration at
-    # `.devcontainer/images/.claude/…`; collapsing on the first dot-directory
-    # would name `.devcontainer/` as the thing to delete — a directory this
-    # gate promises never to touch, holding 400 files it has no quarrel with.
-    # A verdict that names the wrong directory is worse than none.
-    #
-    # tolower() on the candidate is how the case-insensitivity of the grep
-    # above is carried into awk, which has no equivalent flag. A pattern
-    # written with an uppercase letter would simply not collapse — the path is
-    # then reported whole, which is accurate, just longer.
-    if [ "$AGENT_N" -gt 0 ]; then
-        AGENT_ROOTS="$(awk -F/ -v re="$AGENT_RE" '{
-            r = ""; root = $0
-            for (i = 1; i <= NF; i++) {
-                r = (r == "" ? $i : r "/" $i)
-                cand = (i < NF ? r "/" : r)
-                if (tolower(cand) ~ re) { root = cand; break }
-            }
-            if (!(root in n)) order[++k] = root
-            n[root]++
-        }
-        END { for (j = 1; j <= k; j++) print n[order[j]] "\t" order[j] }' "$AGENT_FILE")"
-        AGENT_ROOT_N="$(printf '%s\n' "$AGENT_ROOTS" | wc -l)"
-    fi
+        printf '%s\0' "$p" >> "$AGENT_FILE"
+
+        # The artefact root: the SHORTEST PREFIX THAT STILL MATCHES. Not the
+        # first dot-directory along the path, and the difference is not
+        # cosmetic — the fleet's devcontainer ships its agent configuration at
+        # `.devcontainer/images/.claude/…`, so collapsing on the first would
+        # name `.devcontainer/` as the thing to delete: a directory this gate
+        # promises never to touch, holding 400 files it has no quarrel with. A
+        # verdict that names the wrong directory is worse than none.
+        #
+        # Split with parameter expansion rather than `read -a`: read stops at a
+        # newline, and a newline is one of the characters a path may contain
+        # and this loop exists to handle. Lowercasing the candidate is how the
+        # grep's -i is carried into [[ =~ ]]; a pattern written with an
+        # uppercase letter simply would not collapse, leaving the whole path
+        # reported, which is accurate and merely longer.
+        cand=""; rest="$p"; root="$p"
+        while [ -n "$rest" ]; do
+            seg="${rest%%/*}"
+            cand="${cand}${seg}"
+            if [ "$seg" = "$rest" ]; then rest=""; else cand="${cand}/"; rest="${rest#*/}"; fi
+            if [[ "${cand,,}" =~ $AGENT_RE ]]; then root="$cand"; break; fi
+        done
+        if [ -z "${AGENT_ROOT_COUNT[$root]+set}" ]; then
+            AGENT_ROOT_ORDER+=("$root"); AGENT_ROOT_COUNT["$root"]=0
+        fi
+        AGENT_ROOT_COUNT["$root"]=$(( AGENT_ROOT_COUNT["$root"] + 1 ))
+    done < <(git ls-tree -r -z --name-only "$TREE_REV" | grep -z -iE -- "$AGENT_RE")
+    AGENT_ROOT_N="${#AGENT_ROOT_ORDER[@]}"
 fi
 
 # --- Report -----------------------------------------------------------------
 esc() { printf '%s' "$1" | sed 's/|/\\|/g; s/`/ʼ/g'; }
+# GitHub workflow-command property values are comma-separated and newline-
+# terminated, so a path carrying either would truncate or split the annotation
+# it is supposed to point at. Pure parameter expansion: a path is arbitrary
+# bytes and piping it through sed would lose the newline this exists to encode.
+esc_prop() {
+    local v="$1"
+    v="${v//%/%25}"; v="${v//$'\r'/%0D}"; v="${v//$'\n'/%0A}"
+    v="${v//:/%3A}"; v="${v//,/%2C}"
+    printf '%s' "$v"
+}
 {
     echo "## post-commit"
     echo ""
@@ -436,11 +458,19 @@ esc() { printf '%s' "$1" | sed 's/|/\\|/g; s/`/ʼ/g'; }
         echo "This is the same rejection policy the attribution rules apply to commit"
         echo "messages, applied to what a change leaves on disk."
         echo ""
-        while IFS=$'\t' read -r cnt root; do
-            [ -z "$root" ] && continue
-            if [ "$cnt" -gt 1 ]; then printf -- '- `%s` — %s file(s)\n' "$(esc "$root")" "$cnt"
-            else printf -- '- `%s`\n' "$(esc "$root")"; fi
-        done < <(printf '%s\n' "$AGENT_ROOTS" | head -n "$MAX_REPORT")
+        shown=0
+        for root in ${AGENT_ROOT_ORDER[@]+"${AGENT_ROOT_ORDER[@]}"}; do
+            shown=$((shown + 1)); [ "$shown" -gt "$MAX_REPORT" ] && break
+            # %q on the way out: a no-op for an ordinary path, and the only
+            # honest rendering of one holding a newline or a control character
+            # — which would otherwise break the list it is printed into.
+            disp="$(printf '%q' "$root")"
+            if [ "${AGENT_ROOT_COUNT[$root]}" -gt 1 ]; then
+                printf -- '- `%s` — %s file(s)\n' "$(esc "$disp")" "${AGENT_ROOT_COUNT[$root]}"
+            else
+                printf -- '- `%s`\n' "$(esc "$disp")"
+            fi
+        done
         [ "$AGENT_ROOT_N" -gt "$MAX_REPORT" ] && echo "" && echo "_… and $((AGENT_ROOT_N - MAX_REPORT)) more._"
         echo ""
         echo "> Untrack them and commit — the file stays on your machine:"
@@ -495,9 +525,11 @@ if [ "$AGENT_N" -gt 0 ]; then
     RC=1
     # file= makes GitHub anchor the annotation on the offending path itself,
     # which is also the instruction: this is the file to remove.
-    while IFS= read -r a; do
-        echo "::error file=${a}::agent artefact tracked here — remove it (git rm -r --cached)"
-    done < <(head -n "$MAX_REPORT" "$AGENT_FILE")
+    shown=0
+    while IFS= read -r -d '' a; do
+        shown=$((shown + 1)); [ "$shown" -gt "$MAX_REPORT" ] && break
+        echo "::error file=$(esc_prop "$a")::agent artefact tracked here — remove it (git rm -r --cached)"
+    done < "$AGENT_FILE"
     echo "::error::$AGENT_N agent artefact file(s) tracked at ${TREE_REV:0:12} — no history rewrite needed, one commit removes them"
 fi
 
