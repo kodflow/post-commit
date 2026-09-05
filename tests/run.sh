@@ -421,6 +421,22 @@ d=$(mkrepo); mkdir -p "$d/.claude"; echo '{}' > "$d/.claude/$(printf 'two\nlines
 git -C "$d" add -A; git -C "$d" commit -qm "chore: newline in the file name"
 check "a newline in the file name does not split a record" 1 "$d"
 
+# A tracked path is attacker-controlled input and ends up as an associative
+# array subscript, a [[ ]] operand and an annotation. `declare -A` is what makes
+# the subscript a string rather than an arithmetic expression; this is here so
+# that dropping the -A, or reaching for an indexed array, fails loudly.
+d=$(mkrepo); mkdir -p "$d/a\$(touch PWNED).d" "$d/c];touch PWNED3;x[.d"
+printf 'x' > "$d/a\$(touch PWNED).d/.mcp.json"
+printf 'x' > "$d/c];touch PWNED3;x[.d/.mcp.json"
+git -C "$d" add -A; git -C "$d" commit -qm "chore: hostile parent names"
+( cd "$d" && env GITHUB_STEP_SUMMARY=/dev/null bash "$GATE" HEAD HEAD~1..HEAD ) >/dev/null 2>&1
+if [ ! -e "$d/PWNED" ] && [ ! -e "$d/PWNED3" ]; then
+    PASS=$((PASS+1)); printf '  ok   %s\n' "a hostile file name is data, never evaluated"
+else
+    FAIL=$((FAIL+1)); printf '  FAIL %s — the scan executed part of a path\n' "a hostile file name is data, never evaluated"
+fi
+rm -rf "$d"
+
 # `.claude/*` must exempt what is under `.claude/`, hidden files included. An
 # unquoted expansion would glob it against the working tree first, and bash's
 # filename globbing skips leading dots — so this passed for settings.json and
