@@ -26,6 +26,13 @@
 #   4. format      — conventional-commit subject on the range's non-merge
 #                    commits (project convention, see devcontainer-template).
 #   5. secrets     — no credential-shaped ADDED lines in the range's diff.
+#   6. artefacts   — no AI agent's tooling configuration TRACKED in the tree at
+#                    the head (.claude/, .cursor/, .aider.*, …). The tree and
+#                    not the range: the directory this rule exists to remove
+#                    was merged long before the rule existed, and a range check
+#                    would call every later pull request clean while it sat
+#                    there. Editor configuration is untouched — an editor is
+#                    not an agent.
 #
 # Deliberately NOT here: lint/build/test. Every repo's own CI already runs
 # those server-side, so --no-verify never bypassed them in the first place.
@@ -47,6 +54,15 @@ SECRETS="${PC_SECRETS:-true}"
 HISTORY="${PC_HISTORY:-full}"
 FORMAT="${PC_FORMAT:-true}"
 AUTHORS="${PC_AUTHORS:-}"
+AGENT_FILES="${PC_AGENT_FILES:-true}"
+# read -a, not an unquoted expansion. `for x in ${VAR//,/ }` word-splits AND
+# glob-expands, so an entry like `.claude/*` would be expanded against the
+# working tree before it is ever used as a pattern — and bash's filename
+# globbing skips leading dots, so `.claude/.mcp.json` would come out NOT
+# exempted while `.claude/settings.json` would. read does the splitting
+# without the expansion, leaving the entry to be matched as a pattern by
+# [[ == ]], where `*` does cross both `/` and a leading dot.
+IFS=', ' read -r -a AGENT_ALLOW <<< "${PC_AGENT_ALLOW:-}"
 MAX_REPORT="${PC_MAX_REPORT:-50}"
 SUMMARY="${GITHUB_STEP_SUMMARY:-/dev/null}"
 # Second sink for the same markdown. The job summary is only read by
@@ -68,12 +84,14 @@ fi
 # Comments and blank lines stripped. Case-insensitivity is applied once, by
 # the runner, instead of being baked into each pattern.
 PATTERNS=()
-load_patterns() {
+AGENT_PATTERNS=()
+load_patterns() {   # load_patterns <file> [<array-name>]
     local f="$1" line
+    local -n dest="${2:-PATTERNS}"
     [ -r "$f" ] || { echo "::error::pattern file not readable: $f" >&2; exit 2; }
     while IFS= read -r line || [ -n "$line" ]; do
         case "$line" in ''|'#'*) continue ;; esac
-        PATTERNS+=("$line")
+        dest+=("$line")
     done < "$f"
 }
 load_patterns "$SCRIPT_DIR/patterns.txt"
@@ -81,6 +99,17 @@ load_patterns "$SCRIPT_DIR/patterns.txt"
 if [ "${#PATTERNS[@]}" -eq 0 ]; then
     echo "::error::no patterns loaded — refusing to report a false clean" >&2
     exit 2
+fi
+# Path patterns are a separate list, matched against tracked paths rather than
+# against message text — the two never share a pattern, so they never share a
+# file either. Empty is treated as an error for the same reason as above: a
+# check that silently matches nothing reports a clean it never verified.
+if [ "$AGENT_FILES" = "true" ]; then
+    load_patterns "$SCRIPT_DIR/agent-paths.txt" AGENT_PATTERNS
+    if [ "${#AGENT_PATTERNS[@]}" -eq 0 ]; then
+        echo "::error::no agent path patterns loaded — refusing to report a false clean" >&2
+        exit 2
+    fi
 fi
 
 # --- Allowed identities -----------------------------------------------------
@@ -106,9 +135,10 @@ if [ -n "$AUTHORS" ]; then
 fi
 
 ATTR_FILE="$(mktemp)"; FMT_FILE="$(mktemp)"; SEC_FILE="$(mktemp)"; IDENT_FILE="$(mktemp)"
-TRAIL_FILE="$(mktemp)"; REPORT_BODY="$(mktemp)"
-trap 'rm -f "$ATTR_FILE" "$FMT_FILE" "$SEC_FILE" "$IDENT_FILE" "$TRAIL_FILE" "$REPORT_BODY"' EXIT
-ATTR_N=0; ATTR_SCANNED=0; FMT_N=0; FMT_SCANNED=0; SEC_N=0; IDENT_N=0; TRAIL_N=0
+TRAIL_FILE="$(mktemp)"; AGENT_FILE="$(mktemp)"; REPORT_BODY="$(mktemp)"
+trap 'rm -f "$ATTR_FILE" "$FMT_FILE" "$SEC_FILE" "$IDENT_FILE" "$TRAIL_FILE" "$AGENT_FILE" "$REPORT_BODY"' EXIT
+ATTR_N=0; ATTR_SCANNED=0; FMT_N=0; FMT_SCANNED=0; SEC_N=0; IDENT_N=0; TRAIL_N=0; AGENT_N=0
+AGENT_ROOT_N=0
 
 # Identity trailers, whatever the case. An address here is as permanent as the
 # author field, so the same allow-list applies to both. Accounts whose display
@@ -242,8 +272,102 @@ if [ "$SECRETS" = "true" ] && [ -n "$RANGE" ]; then
              | grep -E '^\+' | grep -Ev '^\+\+\+' | grep -iE -- "$SECRET_RE" | head -40)
 fi
 
+# --- 4. Agent artefacts (the tree at the head) -------------------------------
+# Scope is the tree, not the range, and that is the whole point. The `.claude/`
+# that prompted this rule was merged into a trunk months before the rule
+# existed; a range check sees only what a change adds, so every later pull
+# request would have been called clean while the directory sat there. Reading
+# the tracked paths means the gate stays red until it is actually gone.
+#
+# Which it can afford to be, because gone is cheap here. A tainted commit
+# message needs rewrite-history.sh and new SHAs for every descendant; a tracked
+# file needs one `git rm -r --cached` and a commit. The check never looks at
+# the ancestry, so that commit ends it.
+#
+# --branches is the whole-repository audit scope (push, manual runs,
+# rewrite-history.sh) and is not a tree-ish. There, the checked-out head is the
+# tree to judge — on push that is exactly the commit that was pushed.
+TREE_REV="$HEAD_REV"; [ "$TREE_REV" = "--branches" ] && TREE_REV=HEAD
+declare -A AGENT_ROOT_COUNT=()
+AGENT_ROOT_ORDER=()
+if [ "$AGENT_FILES" = "true" ]; then
+    # One combined alternation rather than a grep per pattern: a large
+    # repository has tens of thousands of tracked paths, and forty passes over
+    # them is forty times the work for the same answer.
+    AGENT_RE=""
+    for pattern in "${AGENT_PATTERNS[@]}"; do AGENT_RE="${AGENT_RE}|(${pattern})"; done
+    AGENT_RE="${AGENT_RE#|}"
+
+    # -z, and NUL all the way through. Without it git C-quotes any path holding
+    # a non-ASCII or control character — `.claude/naïve.md` is emitted as
+    # `".claude/na\303\257ve.md"` — and the quote it adds sits exactly where
+    # `(^|/)` and `$` need a path boundary, so every pattern in agent-paths.txt
+    # stops matching. Measured before the fix: a repository whose `.claude/`
+    # files all carried an accent was reported clean. Naming files that way is
+    # a one-line evasion of the whole rule.
+    #
+    # The paths cannot pass through a shell variable on the way, because a bash
+    # string cannot hold a NUL. So the pipeline runs straight into the loop and
+    # the revision is verified separately rather than through git's exit status.
+    git rev-parse -q --verify "${TREE_REV}^{tree}" >/dev/null 2>&1 || {
+        echo "::error::no tree at '$TREE_REV' — shallow checkout? (needs fetch-depth: 0)" >&2
+        exit 2
+    }
+    while IFS= read -r -d '' p; do
+        [ -z "$p" ] && continue
+        ALLOWED=""
+        for allow in ${AGENT_ALLOW[@]+"${AGENT_ALLOW[@]}"}; do
+            # A bare entry exempts the whole subtree, so `.claude` and
+            # `.claude/*` both mean what whoever wrote the input expects. `*`
+            # crosses `/` inside [[ == ]], so no globstar is involved.
+            # shellcheck disable=SC2053
+            if [[ "$p" == $allow || "$p" == $allow/* ]]; then ALLOWED=y; break; fi
+        done
+        [ -n "$ALLOWED" ] && continue
+        AGENT_N=$((AGENT_N + 1))
+        printf '%s\0' "$p" >> "$AGENT_FILE"
+
+        # The artefact root: the SHORTEST PREFIX THAT STILL MATCHES. Not the
+        # first dot-directory along the path, and the difference is not
+        # cosmetic — the fleet's devcontainer ships its agent configuration at
+        # `.devcontainer/images/.claude/…`, so collapsing on the first would
+        # name `.devcontainer/` as the thing to delete: a directory this gate
+        # promises never to touch, holding 400 files it has no quarrel with. A
+        # verdict that names the wrong directory is worse than none.
+        #
+        # Split with parameter expansion rather than `read -a`: read stops at a
+        # newline, and a newline is one of the characters a path may contain
+        # and this loop exists to handle. Lowercasing the candidate is how the
+        # grep's -i is carried into [[ =~ ]]; a pattern written with an
+        # uppercase letter simply would not collapse, leaving the whole path
+        # reported, which is accurate and merely longer.
+        cand=""; rest="$p"; root="$p"
+        while [ -n "$rest" ]; do
+            seg="${rest%%/*}"
+            cand="${cand}${seg}"
+            if [ "$seg" = "$rest" ]; then rest=""; else cand="${cand}/"; rest="${rest#*/}"; fi
+            if [[ "${cand,,}" =~ $AGENT_RE ]]; then root="$cand"; break; fi
+        done
+        if [ -z "${AGENT_ROOT_COUNT[$root]+set}" ]; then
+            AGENT_ROOT_ORDER+=("$root"); AGENT_ROOT_COUNT["$root"]=0
+        fi
+        AGENT_ROOT_COUNT["$root"]=$(( AGENT_ROOT_COUNT["$root"] + 1 ))
+    done < <(git ls-tree -r -z --name-only "$TREE_REV" | grep -z -iE -- "$AGENT_RE")
+    AGENT_ROOT_N="${#AGENT_ROOT_ORDER[@]}"
+fi
+
 # --- Report -----------------------------------------------------------------
 esc() { printf '%s' "$1" | sed 's/|/\\|/g; s/`/ʼ/g'; }
+# GitHub workflow-command property values are comma-separated and newline-
+# terminated, so a path carrying either would truncate or split the annotation
+# it is supposed to point at. Pure parameter expansion: a path is arbitrary
+# bytes and piping it through sed would lose the newline this exists to encode.
+esc_prop() {
+    local v="$1"
+    v="${v//%/%25}"; v="${v//$'\r'/%0D}"; v="${v//$'\n'/%0A}"
+    v="${v//:/%3A}"; v="${v//,/%2C}"
+    printf '%s' "$v"
+}
 {
     echo "## post-commit"
     echo ""
@@ -253,9 +377,11 @@ esc() { printf '%s' "$1" | sed 's/|/\\|/g; s/`/ʼ/g'; }
         echo "Attribution: **$ATTR_SCANNED** commit(s) in \`$RANGE\`."
     fi
     [ -n "$RANGE" ] && echo "Format: **$FMT_SCANNED** non-merge commit(s) in \`$RANGE\`. Secrets: added lines in \`$RANGE\`."
+    [ "$AGENT_FILES" = "true" ] && echo "Agent artefacts: paths tracked at \`${TREE_REV:0:12}\`."
     echo ""
-    if [ "$ATTR_N" -eq 0 ] && [ "$FMT_N" -eq 0 ] && [ "$SEC_N" -eq 0 ] && [ "$IDENT_N" -eq 0 ] && [ "$TRAIL_N" -eq 0 ]; then
-        echo "✅ Clean — allowed identities, no AI attribution, conventional subjects, no credentials added."
+    if [ "$ATTR_N" -eq 0 ] && [ "$FMT_N" -eq 0 ] && [ "$SEC_N" -eq 0 ] && [ "$IDENT_N" -eq 0 ] \
+       && [ "$TRAIL_N" -eq 0 ] && [ "$AGENT_N" -eq 0 ]; then
+        echo "✅ Clean — allowed identities, no AI attribution, conventional subjects, no credentials added, no agent artefacts tracked."
     fi
     if [ "$TRAIL_N" -gt 0 ]; then
         echo "### ❌ Foreign identity in a trailer — $TRAIL_N commit(s)"
@@ -325,6 +451,40 @@ esc() { printf '%s' "$1" | sed 's/|/\\|/g; s/`/ʼ/g'; }
         while IFS= read -r l; do printf -- '- `%s…`\n' "$(printf '%s' "$l" | cut -c1-40 | tr -d '`')"; done < "$SEC_FILE"
         echo ""
     fi
+    if [ "$AGENT_N" -gt 0 ]; then
+        echo "### ❌ Agent artefacts tracked — $AGENT_N file(s)"
+        echo ""
+        echo "An AI agent's tooling configuration does not belong in a repository."
+        echo "This is the same rejection policy the attribution rules apply to commit"
+        echo "messages, applied to what a change leaves on disk."
+        echo ""
+        shown=0
+        for root in ${AGENT_ROOT_ORDER[@]+"${AGENT_ROOT_ORDER[@]}"}; do
+            shown=$((shown + 1)); [ "$shown" -gt "$MAX_REPORT" ] && break
+            # %q on the way out: a no-op for an ordinary path, and the only
+            # honest rendering of one holding a newline or a control character
+            # — which would otherwise break the list it is printed into.
+            disp="$(printf '%q' "$root")"
+            if [ "${AGENT_ROOT_COUNT[$root]}" -gt 1 ]; then
+                printf -- '- `%s` — %s file(s)\n' "$(esc "$disp")" "${AGENT_ROOT_COUNT[$root]}"
+            else
+                printf -- '- `%s`\n' "$(esc "$disp")"
+            fi
+        done
+        [ "$AGENT_ROOT_N" -gt "$MAX_REPORT" ] && echo "" && echo "_… and $((AGENT_ROOT_N - MAX_REPORT)) more._"
+        echo ""
+        echo "> Untrack them and commit — the file stays on your machine:"
+        echo "> \`git rm -r --cached <path>\` then add it to \`.gitignore\`."
+        echo "> **No history rewrite is needed**: this check reads the tree at the head,"
+        echo "> not the ancestry, so one commit clears it."
+        echo ">"
+        echo "> Editor configuration (\`.vscode/\`, \`.idea/\`), \`.devcontainer/\` itself and"
+        echo "> markdown instructions (\`CLAUDE.md\`, \`AGENTS.md\`) are never matched — but an"
+        echo "> agent directory nested inside one of them still is."
+        echo "> A repository that exists to distribute this configuration exempts the"
+        echo "> exact paths it ships with the \`agent_files_allow\` input."
+        echo ""
+    fi
 } > "$REPORT_BODY"
 cat "$REPORT_BODY" >> "$SUMMARY"
 [ -n "$REPORT" ] && cp "$REPORT_BODY" "$REPORT"
@@ -361,8 +521,23 @@ if [ "$SEC_N" -gt 0 ]; then
     RC=1
     echo "::error::$SEC_N added line(s) look like credentials"
 fi
+if [ "$AGENT_N" -gt 0 ]; then
+    RC=1
+    # file= makes GitHub anchor the annotation on the offending path itself,
+    # which is also the instruction: this is the file to remove.
+    shown=0
+    while IFS= read -r -d '' a; do
+        shown=$((shown + 1)); [ "$shown" -gt "$MAX_REPORT" ] && break
+        echo "::error file=$(esc_prop "$a")::agent artefact tracked here — remove it (git rm -r --cached)"
+    done < "$AGENT_FILE"
+    echo "::error::$AGENT_N agent artefact file(s) tracked at ${TREE_REV:0:12} — no history rewrite needed, one commit removes them"
+fi
 
 if [ "$RC" -eq 0 ]; then
-    echo "✅ post-commit: $ATTR_SCANNED commit(s) attribution-free${IDENT_RE:+ and correctly attributed}, $FMT_SCANNED subject(s) conventional, no credentials added"
+    # PC_AGENT_FILES is "true" or "false" — both non-empty, so the claim is
+    # built from whether the check ran, not from the flag's truthiness.
+    AGENT_CLAIM=""
+    [ "$AGENT_FILES" = "true" ] && AGENT_CLAIM=", no agent artefacts tracked"
+    echo "✅ post-commit: $ATTR_SCANNED commit(s) attribution-free${IDENT_RE:+ and correctly attributed}, $FMT_SCANNED subject(s) conventional, no credentials added${AGENT_CLAIM}"
 fi
 exit "$RC"

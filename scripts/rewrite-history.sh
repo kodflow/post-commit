@@ -76,7 +76,14 @@ git clone --mirror -q "https://github.com/$REPO.git" "$MIRROR" || exit 1
 BEFORE_COUNT="$(git -C "$MIRROR" rev-list --branches --tags --count)"
 # The gate exits 1 on a tainted history — expected here — and `pipefail`
 # would turn that into a pipeline failure, so capture first, parse after.
-BEFORE_OUT="$(cd "$MIRROR" && GITHUB_STEP_SUMMARY=/dev/null PC_MAX_REPORT=0 PC_AUTHORS="$AUTHORS" bash "$SCRIPT_DIR/post-commit.sh" --branches 2>&1 || true)"
+#
+# PC_AGENT_FILES=false on both gate calls, before and after: this script
+# rewrites messages and identities and never touches the tree, so a tracked
+# `.claude/` would show up in the "after" verdict as a failure the rewrite was
+# never meant to fix — and the --execute path refuses to push a history the
+# gate rejects, so a correct rewrite would be blocked by an unrelated rule.
+# Removing those files is one ordinary commit; it does not belong here.
+BEFORE_OUT="$(cd "$MIRROR" && GITHUB_STEP_SUMMARY=/dev/null PC_MAX_REPORT=0 PC_AGENT_FILES=false PC_AUTHORS="$AUTHORS" bash "$SCRIPT_DIR/post-commit.sh" --branches 2>&1 || true)"
 BEFORE_TAINT="$(printf '%s' "$BEFORE_OUT" | grep -oE '^::error::[0-9]+ tainted' | grep -oE '[0-9]+' || true)"
 : "${BEFORE_TAINT:=0}"
 # Identity violations are counted separately: a repository can be free of AI
@@ -247,7 +254,7 @@ AFTER_COUNT="$(git -C "$MIRROR" rev-list --branches --tags --count)"
 CHANGED="$(awk 'NR>1 && $1!=$2' "$MIRROR/filter-repo/commit-map" 2>/dev/null | wc -l | tr -d ' ')"
 
 # --- verify with the gate itself --------------------------------------------
-GATE_OUT="$(cd "$MIRROR" && GITHUB_STEP_SUMMARY=/dev/null PC_MAX_REPORT=20 PC_AUTHORS="$AUTHORS" bash "$SCRIPT_DIR/post-commit.sh" --branches 2>&1)"
+GATE_OUT="$(cd "$MIRROR" && GITHUB_STEP_SUMMARY=/dev/null PC_MAX_REPORT=20 PC_AGENT_FILES=false PC_AUTHORS="$AUTHORS" bash "$SCRIPT_DIR/post-commit.sh" --branches 2>&1)"
 GATE_RC=$?
 RESIDUAL_KW="$(git -C "$MIRROR" log --branches --format='%h %s%n%b' | grep -iE 'claude|anthropic|copilot|chatgpt|openai|gemini|\bllm\b' | head -20)"
 OPEN_PRS="$(gh pr list --repo "$REPO" --state open --json number,title --jq '.[] | "#\(.number) \(.title)"' 2>/dev/null)"

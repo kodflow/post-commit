@@ -343,6 +343,179 @@ d=$(mkrepo); mkdir -p "$d/tests"; echo 'AKIAIOSFODNN7EXAMPLE' > "$d/tests/fixtur
 git -C "$d" add -A; git -C "$d" commit -qm "chore: config"
 check "a real path still fails even with a fixture alongside" 1 "$d"
 
+echo "== agent artefacts =="
+# The tree, not the range. Every case below commits with a conventional
+# subject and an allowed identity so that exit 1 can only mean this check.
+d=$(mkrepo); mkdir -p "$d/.claude"; echo '{}' > "$d/.claude/settings.json"
+git -C "$d" add -A; git -C "$d" commit -qm "chore: add agent config"
+check "a tracked .claude/ is refused" 1 "$d"
+
+d=$(mkrepo); mkdir -p "$d/.vscode"; echo '{}' > "$d/.vscode/settings.json"
+git -C "$d" add -A; git -C "$d" commit -qm "chore: editor settings"
+check ".vscode/ is editor config, not an agent" 0 "$d"
+
+d=$(mkrepo); mkdir -p "$d/.idea" "$d/.devcontainer"
+echo '<x/>' > "$d/.idea/workspace.xml"; echo '{}' > "$d/.devcontainer/devcontainer.json"
+git -C "$d" add -A; git -C "$d" commit -qm "chore: editor and environment"
+check ".idea/ and .devcontainer/ are kept" 0 "$d"
+
+# The scope decision of #21: markdown instructions read as project
+# documentation and 21 fleet repos carry one, so they are deliberately out.
+d=$(mkrepo); echo '# instructions' > "$d/CLAUDE.md"; echo '# agents' > "$d/AGENTS.md"
+git -C "$d" add -A; git -C "$d" commit -qm "docs: project instructions"
+check "CLAUDE.md and AGENTS.md are tolerated as documentation" 0 "$d"
+
+d=$(mkrepo); echo 'be nice' > "$d/.cursorrules"
+git -C "$d" add -A; git -C "$d" commit -qm "chore: cursor rules"
+check "a dotfile agent config is refused too" 1 "$d"
+
+d=$(mkrepo); echo 'chat' > "$d/.aider.chat.history.md"
+git -C "$d" add -A; git -C "$d" commit -qm "chore: leftovers"
+check "aider drops its history with a known prefix" 1 "$d"
+
+d=$(mkrepo); mkdir -p "$d/packages/app/.claude"; echo '{}' > "$d/packages/app/.claude/x.json"
+git -C "$d" add -A; git -C "$d" commit -qm "chore: nested agent config"
+check "a nested .claude/ is found, not just the root one" 1 "$d"
+
+# The whole point of reading the tree: the artefact arrives in an ancestor and
+# the range that adds it is long merged. A range-scoped check would call this
+# clean, which is exactly how the directory that prompted the rule survived.
+d=$(mkrepo); mkdir -p "$d/.claude"; echo '{}' > "$d/.claude/settings.json"
+git -C "$d" add -A; git -C "$d" commit -qm "chore: agent config"
+commit_msg "$d" "feat: unrelated later work"
+check "an artefact merged earlier still fails a later clean change" 1 "$d" PC_HISTORY=range
+
+# …and removing it is enough. No history rewrite, unlike an attribution.
+d=$(mkrepo); mkdir -p "$d/.claude"; echo '{}' > "$d/.claude/settings.json"
+git -C "$d" add -A; git -C "$d" commit -qm "chore: agent config"
+git -C "$d" rm -qr .claude; git -C "$d" commit -qm "chore: drop the agent config"
+check "removing it in one commit clears the check" 0 "$d"
+
+d=$(mkrepo); mkdir -p "$d/.claude"; echo '{}' > "$d/.claude/settings.json"
+git -C "$d" add -A; git -C "$d" commit -qm "chore: agent config"
+check "the check is switchable" 0 "$d" PC_AGENT_FILES=false
+
+# A repository whose purpose is to distribute this config exempts its paths.
+d=$(mkrepo); mkdir -p "$d/.claude"; echo '{}' > "$d/.claude/settings.json"
+git -C "$d" add -A; git -C "$d" commit -qm "chore: agent config"
+check "a bare allow entry exempts the whole subtree" 0 "$d" PC_AGENT_ALLOW=.claude
+
+d=$(mkrepo); mkdir -p "$d/.claude" "$d/.cursor"
+echo '{}' > "$d/.claude/settings.json"; echo '{}' > "$d/.cursor/rules.json"
+git -C "$d" add -A; git -C "$d" commit -qm "chore: two agents"
+check "an allow entry exempts only what it names" 1 "$d" PC_AGENT_ALLOW=".claude/*"
+
+# git C-quotes a path holding a non-ASCII or control character unless asked for
+# NUL-delimited output, and the quote it adds lands exactly where `(^|/)` and
+# `$` need a path boundary. Before the fix these three were reported clean —
+# naming every file in `.claude/` with an accent evaded the whole rule.
+d=$(mkrepo); mkdir -p "$d/.claude"; echo '{}' > "$d/.claude/naïve.md"
+git -C "$d" add -A; git -C "$d" commit -qm "chore: accented name inside the artefact"
+check "a non-ASCII file name does not evade the scan" 1 "$d"
+
+d=$(mkrepo); mkdir -p "$d/déjà"; echo '{}' > "$d/déjà/.mcp.json"
+git -C "$d" add -A; git -C "$d" commit -qm "chore: anchored artefact below a non-ASCII parent"
+check "an end-anchored pattern still matches below a non-ASCII parent" 1 "$d"
+
+d=$(mkrepo); mkdir -p "$d/.claude"; echo '{}' > "$d/.claude/$(printf 'two\nlines').md"
+git -C "$d" add -A; git -C "$d" commit -qm "chore: newline in the file name"
+check "a newline in the file name does not split a record" 1 "$d"
+
+# A tracked path is attacker-controlled input and ends up as an associative
+# array subscript, a [[ ]] operand and an annotation. `declare -A` is what makes
+# the subscript a string rather than an arithmetic expression; this is here so
+# that dropping the -A, or reaching for an indexed array, fails loudly.
+d=$(mkrepo); mkdir -p "$d/a\$(touch PWNED).d" "$d/c];touch PWNED3;x[.d"
+printf 'x' > "$d/a\$(touch PWNED).d/.mcp.json"
+printf 'x' > "$d/c];touch PWNED3;x[.d/.mcp.json"
+git -C "$d" add -A; git -C "$d" commit -qm "chore: hostile parent names"
+( cd "$d" && env GITHUB_STEP_SUMMARY=/dev/null bash "$GATE" HEAD HEAD~1..HEAD ) >/dev/null 2>&1
+rc=$?
+# The exit status belongs in the assertion: "nothing was executed" is also true
+# of a scan that matched nothing, so without it a regression in the matching
+# would leave this test green while proving only that a clean run is harmless.
+if [ "$rc" -eq 1 ] && [ ! -e "$d/PWNED" ] && [ ! -e "$d/PWNED3" ]; then
+    PASS=$((PASS+1)); printf '  ok   %s\n' "a hostile file name is data, never evaluated"
+elif [ "$rc" -ne 1 ]; then
+    FAIL=$((FAIL+1)); printf '  FAIL %s — the gate did not refuse them (exit %s)\n' "a hostile file name is data, never evaluated" "$rc"
+else
+    FAIL=$((FAIL+1)); printf '  FAIL %s — the scan executed part of a path\n' "a hostile file name is data, never evaluated"
+fi
+rm -rf "$d"
+
+# `.claude/*` must exempt what is under `.claude/`, hidden files included. An
+# unquoted expansion would glob it against the working tree first, and bash's
+# filename globbing skips leading dots — so this passed for settings.json and
+# quietly failed for .mcp.json next to it.
+d=$(mkrepo); mkdir -p "$d/.claude"
+echo '{}' > "$d/.claude/settings.json"; echo '{}' > "$d/.claude/.mcp.json"
+git -C "$d" add -A; git -C "$d" commit -qm "chore: agent config with a hidden file"
+check "a glob allow entry covers hidden files too" 0 "$d" PC_AGENT_ALLOW=".claude/*"
+
+# The root is found with the pattern list, so the pattern list has to reach awk
+# intact. On an awk that strips the escape from a -v value, `\.` becomes a bare
+# `.`, `aclaude/` matches `(^|/).claude/`, and the verdict names an ordinary
+# directory as the thing to delete.
+d=$(mkrepo); mkdir -p "$d/aclaude/.claude"
+echo '{}' > "$d/aclaude/.claude/settings.json"
+git -C "$d" add -A; git -C "$d" commit -qm "chore: agent config below a lookalike"
+r="$(mktemp)"
+( cd "$d" && env GITHUB_STEP_SUMMARY=/dev/null PC_REPORT="$r" bash "$GATE" HEAD HEAD~1..HEAD ) >/dev/null 2>&1
+if grep -qF '`aclaude/.claude/`' "$r" && ! grep -qF '`aclaude/`' "$r"; then
+    PASS=$((PASS+1)); printf '  ok   %s\n' "a directory whose name merely ends in the pattern is not the root"
+else
+    FAIL=$((FAIL+1)); printf '  FAIL %s\n%s\n' "a directory whose name merely ends in the pattern is not the root" "$(sed 's/^/       /' "$r")"
+fi
+rm -rf "$d" "$r"
+
+# The verdict names the artefact root, and getting that root wrong is worse
+# than not collapsing at all: the fleet's devcontainer ships its agent config
+# at .devcontainer/images/.claude/, and naming `.devcontainer/` as the thing to
+# delete would point at 400 files the gate has no quarrel with.
+d=$(mkrepo); mkdir -p "$d/.devcontainer/images/.claude"
+echo '{}' > "$d/.devcontainer/images/.claude/settings.json"
+echo '{}' > "$d/.devcontainer/devcontainer.json"
+git -C "$d" add -A; git -C "$d" commit -qm "chore: devcontainer with agent config"
+r="$(mktemp)"
+( cd "$d" && env GITHUB_STEP_SUMMARY=/dev/null PC_REPORT="$r" bash "$GATE" HEAD HEAD~1..HEAD ) >/dev/null 2>&1
+if grep -qF '`.devcontainer/images/.claude/`' "$r" && ! grep -qF '`.devcontainer/` —' "$r"; then
+    PASS=$((PASS+1)); printf '  ok   %s\n' "the reported root is the artefact, not the .devcontainer around it"
+else
+    FAIL=$((FAIL+1)); printf '  FAIL %s\n%s\n' "the reported root is the artefact, not the .devcontainer around it" "$(sed 's/^/       /' "$r")"
+fi
+rm -rf "$d" "$r"
+
+# The whole-repository scope (push, manual runs) is not a tree-ish; the check
+# has to fall back to the checked-out head rather than fail the job.
+d=$(mkrepo); mkdir -p "$d/.claude"; echo '{}' > "$d/.claude/settings.json"
+git -C "$d" add -A; git -C "$d" commit -qm "chore: agent config"
+out="$(cd "$d" && env GITHUB_STEP_SUMMARY=/dev/null bash "$GATE" --branches 2>&1)"; rc=$?
+if [ "$rc" -eq 1 ] && printf '%s' "$out" | grep -q 'agent artefact'; then
+    PASS=$((PASS+1)); printf '  ok   %s\n' "--branches scans the checked-out tree"
+else
+    FAIL=$((FAIL+1)); printf '  FAIL %s (want exit 1 and an artefact error, got %s)\n' "--branches scans the checked-out tree" "$rc"
+fi
+rm -rf "$d"
+
+# rewrite-history.sh keeps the artefact check off on both of its gate calls: it
+# rewrites messages and identities and never touches the tree, so a tracked
+# `.claude/` would make --execute refuse to push a correct rewrite. Running the
+# script itself needs a network mirror and git-filter-repo; what is guarded
+# here is the pairing that can silently come undone.
+# Counted on the invoking lines themselves, not on the file: the comment that
+# explains the pairing names the variable too, and matching that would make the
+# guard pass on the explanation alone.
+calls="$(grep -c 'post-commit.sh" --branches' "$ROOT/scripts/rewrite-history.sh")"
+guarded="$(grep 'post-commit.sh" --branches' "$ROOT/scripts/rewrite-history.sh" | grep -c 'PC_AGENT_FILES=false')"
+# Two, not "at least one": the before scan feeds the tainted/identity counters
+# the report prints, and the after scan is what --execute consults before force
+# pushing. Losing either is a silent regression that `-gt 0` would wave through.
+if [ "$calls" -eq 2 ] && [ "$guarded" -eq 2 ]; then
+    PASS=$((PASS+1)); printf '  ok   %s\n' "every rewrite-history gate call disables the artefact check"
+else
+    FAIL=$((FAIL+1)); printf '  FAIL %s (want 2 call(s) all guarded, got %s call(s), %s guarded)\n' "every rewrite-history gate call disables the artefact check" "$calls" "$guarded"
+fi
+
 echo "== usage errors (expect 2) =="
 d=$(mkrepo)
 out="$(cd "$d" && bash "$GATE" 2>&1)"; rc=$?
