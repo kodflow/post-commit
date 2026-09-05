@@ -1,0 +1,105 @@
+# Agent artefact paths — one ERE per line, matched case-insensitively against
+# every path tracked at the scanned head. Blank lines and #-comments ignored.
+#
+# Single source of truth for the fleet: a rule added here is live in every
+# repo pinned to kodflow/post-commit@main on its next run.
+#
+# DESIGN — a tracked PATH, not a mention. `.claude/` had to stay opt-in in
+# patterns.txt for a precise reason: a commit MESSAGE naming it is ordinary
+# work ("fix: update .claude/scripts/…"), and 25 of devcontainer-template's
+# last 60 legitimate subjects match. A tracked path is the opposite case. The
+# string `.claude/settings.json` in the tree IS the artefact; there is nothing
+# to misread, no prose to be fair to. Same characters, no false-positive
+# problem — so this file is a default while patterns-strict.txt is not.
+#
+# The remedy differs too, and that is why the scope can afford to be the whole
+# tree. An attribution lives in a commit and only a history rewrite removes it.
+# A tracked file is removed by removing it:
+#
+#     git rm -r --cached .claude && echo '.claude/' >> .gitignore && commit
+#
+# The check reads the tree at the head, never the ancestry, so that one commit
+# clears it for good.
+#
+# SCOPE — an agent's tooling configuration. Deliberately NOT matched, and by
+# decision rather than by omission:
+#
+#   · .vscode/ .idea/ .zed/ .fleet/ .helix/ — editor configuration. An editor
+#     is not an agent, and a repository's editor settings long predate all of
+#     this. Whatever else changes here, these stay out.
+#   · .devcontainer/ — the environment definition. Humans and CI read it too.
+#     Note the exact claim: nothing is matched BECAUSE it sits under
+#     .devcontainer/. An agent directory nested there is still an agent
+#     directory — the fleet's own template ships one at
+#     .devcontainer/images/.claude/ — and exempting a parent would make
+#     "put it under .devcontainer/" the way around every rule in this file.
+#   · CLAUDE.md AGENTS.md GEMINI.md .github/copilot-instructions.md — markdown
+#     instructions read as project documentation, and 21 fleet repositories
+#     carry one. Whether that prose belongs in a repository is an editorial
+#     call; a gate is the wrong place to make it.
+#
+# A repository whose purpose IS to distribute this configuration —
+# devcontainer-template — exempts itself with the `agent_files_allow` input
+# rather than by weakening the list here.
+
+# --- Claude Code ------------------------------------------------------------
+(^|/)\.claude/
+(^|/)\.claude\.json$
+(^|/)\.claudeignore$
+# The project-level MCP server list: agent tooling by definition. Bare
+# `mcp.json` is NOT matched — it is the ordinary config file name of every
+# repository that implements an MCP server, several of which are ours.
+(^|/)\.mcp\.json$
+# --- Cursor -----------------------------------------------------------------
+(^|/)\.cursor/
+(^|/)\.cursorrules$
+(^|/)\.cursorignore$
+(^|/)\.cursorindexingignore$
+# --- OpenAI Codex -----------------------------------------------------------
+(^|/)\.codex/
+# --- GitHub Copilot ---------------------------------------------------------
+(^|/)\.copilot/
+# --- Gemini CLI / Code Assist -----------------------------------------------
+(^|/)\.gemini/
+(^|/)\.aiexclude$
+# --- Windsurf / Codeium -----------------------------------------------------
+(^|/)\.windsurf/
+(^|/)\.windsurfrules$
+(^|/)\.codeium/
+(^|/)\.codeiumignore$
+# --- aider ------------------------------------------------------------------
+# One pattern for the lot: aider prefixes every dropping it leaves behind —
+# .aider.chat.history.md, .aider.input.history, .aider.tags.cache.v3/,
+# .aider.conf.yml — with the same string.
+(^|/)\.aider[.-]
+(^|/)\.aiderignore$
+# --- Cline / Roo Code / Kilo Code -------------------------------------------
+(^|/)\.cline/
+# .clinerules is a file in older versions and a directory in newer ones.
+(^|/)\.clinerules(/|$)
+(^|/)\.roo/
+(^|/)\.roomodes$
+(^|/)\.kilocode/
+# --- Continue ---------------------------------------------------------------
+(^|/)\.continue/
+# --- Goose ------------------------------------------------------------------
+(^|/)\.goose/
+(^|/)\.goosehints$
+# --- opencode / Crush / Trae / Junie / Augment ------------------------------
+(^|/)\.opencode/
+(^|/)\.crush/
+(^|/)\.trae/
+(^|/)\.junie/
+(^|/)\.augment/
+(^|/)\.augmentignore$
+# --- Amazon Q Developer / Kiro ----------------------------------------------
+(^|/)\.amazonq/
+(^|/)\.kiro/
+# --- Qodo / SpecStory / Devin / Tabnine / Plandex ---------------------------
+(^|/)\.qodo/
+(^|/)\.specstory/
+(^|/)\.devin/
+(^|/)\.tabnine/
+(^|/)\.plandex/
+# --- JetBrains AI -----------------------------------------------------------
+(^|/)\.aiignore$

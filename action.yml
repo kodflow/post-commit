@@ -5,8 +5,9 @@
 name: post-commit
 description: >-
   Mandatory merge gate: every commit authored by an allowed account, no AI
-  attribution anywhere in history, conventional commit subjects, no
-  credentials added. Logic lives in kodflow/post-commit —
+  attribution anywhere in history, no agent configuration tracked in the tree,
+  conventional commit subjects, no credentials added. Logic lives in
+  kodflow/post-commit —
   callers pin @main so a fix there is live everywhere on the next run.
 branding:
   icon: shield
@@ -35,6 +36,22 @@ inputs:
   secrets:
     description: Scan the range's added lines for credential shapes.
     default: 'true'
+  agent_files:
+    description: >-
+      Refuse an AI agent's tooling configuration tracked in the repository —
+      .claude/, .cursor/, .windsurf/, .aider.*, .codex/, … (full list:
+      scripts/agent-paths.txt). The tree at the head is what is read, not the
+      range, so the check stays red until the files are gone; one `git rm
+      --cached` clears it, no history rewrite. Editor configuration (.vscode/,
+      .idea/), .devcontainer/ and markdown instructions (CLAUDE.md, AGENTS.md)
+      are never matched.
+    default: 'true'
+  agent_files_allow:
+    description: >-
+      Space/comma separated paths exempt from the agent-artefact check, for a
+      repository whose purpose is to distribute that configuration. A bare
+      entry exempts the whole subtree: `.claude` covers `.claude/settings.json`.
+    default: ''
   token:
     description: Token used to check out the calling repository.
     default: ${{ github.token }}
@@ -137,6 +154,8 @@ runs:
         PC_HISTORY: ${{ inputs.history }}
         PC_FORMAT: ${{ inputs.format }}
         PC_SECRETS: ${{ inputs.secrets }}
+        PC_AGENT_FILES: ${{ inputs.agent_files }}
+        PC_AGENT_ALLOW: ${{ inputs.agent_files_allow }}
         PC_REPORT: ${{ runner.temp }}/post-commit-report.md
       run: |
         rc=0

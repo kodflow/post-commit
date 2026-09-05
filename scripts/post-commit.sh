@@ -26,6 +26,13 @@
 #   4. format      — conventional-commit subject on the range's non-merge
 #                    commits (project convention, see devcontainer-template).
 #   5. secrets     — no credential-shaped ADDED lines in the range's diff.
+#   6. artefacts   — no AI agent's tooling configuration TRACKED in the tree at
+#                    the head (.claude/, .cursor/, .aider.*, …). The tree and
+#                    not the range: the directory this rule exists to remove
+#                    was merged long before the rule existed, and a range check
+#                    would call every later pull request clean while it sat
+#                    there. Editor configuration is untouched — an editor is
+#                    not an agent.
 #
 # Deliberately NOT here: lint/build/test. Every repo's own CI already runs
 # those server-side, so --no-verify never bypassed them in the first place.
@@ -47,6 +54,8 @@ SECRETS="${PC_SECRETS:-true}"
 HISTORY="${PC_HISTORY:-full}"
 FORMAT="${PC_FORMAT:-true}"
 AUTHORS="${PC_AUTHORS:-}"
+AGENT_FILES="${PC_AGENT_FILES:-true}"
+AGENT_ALLOW="${PC_AGENT_ALLOW:-}"
 MAX_REPORT="${PC_MAX_REPORT:-50}"
 SUMMARY="${GITHUB_STEP_SUMMARY:-/dev/null}"
 # Second sink for the same markdown. The job summary is only read by
@@ -68,12 +77,14 @@ fi
 # Comments and blank lines stripped. Case-insensitivity is applied once, by
 # the runner, instead of being baked into each pattern.
 PATTERNS=()
-load_patterns() {
+AGENT_PATTERNS=()
+load_patterns() {   # load_patterns <file> [<array-name>]
     local f="$1" line
+    local -n dest="${2:-PATTERNS}"
     [ -r "$f" ] || { echo "::error::pattern file not readable: $f" >&2; exit 2; }
     while IFS= read -r line || [ -n "$line" ]; do
         case "$line" in ''|'#'*) continue ;; esac
-        PATTERNS+=("$line")
+        dest+=("$line")
     done < "$f"
 }
 load_patterns "$SCRIPT_DIR/patterns.txt"
@@ -81,6 +92,17 @@ load_patterns "$SCRIPT_DIR/patterns.txt"
 if [ "${#PATTERNS[@]}" -eq 0 ]; then
     echo "::error::no patterns loaded — refusing to report a false clean" >&2
     exit 2
+fi
+# Path patterns are a separate list, matched against tracked paths rather than
+# against message text — the two never share a pattern, so they never share a
+# file either. Empty is treated as an error for the same reason as above: a
+# check that silently matches nothing reports a clean it never verified.
+if [ "$AGENT_FILES" = "true" ]; then
+    load_patterns "$SCRIPT_DIR/agent-paths.txt" AGENT_PATTERNS
+    if [ "${#AGENT_PATTERNS[@]}" -eq 0 ]; then
+        echo "::error::no agent path patterns loaded — refusing to report a false clean" >&2
+        exit 2
+    fi
 fi
 
 # --- Allowed identities -----------------------------------------------------
@@ -106,9 +128,10 @@ if [ -n "$AUTHORS" ]; then
 fi
 
 ATTR_FILE="$(mktemp)"; FMT_FILE="$(mktemp)"; SEC_FILE="$(mktemp)"; IDENT_FILE="$(mktemp)"
-TRAIL_FILE="$(mktemp)"; REPORT_BODY="$(mktemp)"
-trap 'rm -f "$ATTR_FILE" "$FMT_FILE" "$SEC_FILE" "$IDENT_FILE" "$TRAIL_FILE" "$REPORT_BODY"' EXIT
-ATTR_N=0; ATTR_SCANNED=0; FMT_N=0; FMT_SCANNED=0; SEC_N=0; IDENT_N=0; TRAIL_N=0
+TRAIL_FILE="$(mktemp)"; AGENT_FILE="$(mktemp)"; REPORT_BODY="$(mktemp)"
+trap 'rm -f "$ATTR_FILE" "$FMT_FILE" "$SEC_FILE" "$IDENT_FILE" "$TRAIL_FILE" "$AGENT_FILE" "$REPORT_BODY"' EXIT
+ATTR_N=0; ATTR_SCANNED=0; FMT_N=0; FMT_SCANNED=0; SEC_N=0; IDENT_N=0; TRAIL_N=0; AGENT_N=0
+AGENT_ROOTS=""; AGENT_ROOT_N=0
 
 # Identity trailers, whatever the case. An address here is as permanent as the
 # author field, so the same allow-list applies to both. Accounts whose display
@@ -242,6 +265,85 @@ if [ "$SECRETS" = "true" ] && [ -n "$RANGE" ]; then
              | grep -E '^\+' | grep -Ev '^\+\+\+' | grep -iE -- "$SECRET_RE" | head -40)
 fi
 
+# --- 4. Agent artefacts (the tree at the head) -------------------------------
+# Scope is the tree, not the range, and that is the whole point. The `.claude/`
+# that prompted this rule was merged into a trunk months before the rule
+# existed; a range check sees only what a change adds, so every later pull
+# request would have been called clean while the directory sat there. Reading
+# the tracked paths means the gate stays red until it is actually gone.
+#
+# Which it can afford to be, because gone is cheap here. A tainted commit
+# message needs rewrite-history.sh and new SHAs for every descendant; a tracked
+# file needs one `git rm -r --cached` and a commit. The check never looks at
+# the ancestry, so that commit ends it.
+#
+# --branches is the whole-repository audit scope (push, manual runs,
+# rewrite-history.sh) and is not a tree-ish. There, the checked-out head is the
+# tree to judge — on push that is exactly the commit that was pushed.
+TREE_REV="$HEAD_REV"; [ "$TREE_REV" = "--branches" ] && TREE_REV=HEAD
+if [ "$AGENT_FILES" = "true" ]; then
+    # One combined alternation rather than a grep per pattern: a large
+    # repository has tens of thousands of tracked paths, and forty passes over
+    # them is forty times the work for the same answer. Nothing is lost by not
+    # recording which alternative fired — unlike a message match, the path is
+    # its own evidence.
+    AGENT_RE=""
+    for pattern in "${AGENT_PATTERNS[@]}"; do AGENT_RE="${AGENT_RE}|(${pattern})"; done
+    AGENT_RE="${AGENT_RE#|}"
+    TREE="$(git ls-tree -r --name-only "$TREE_REV" 2>/dev/null)" || {
+        echo "::error::git ls-tree failed for '$TREE_REV' — no such tree?" >&2
+        exit 2
+    }
+    while IFS= read -r p; do
+        [ -z "$p" ] && continue
+        ALLOWED=""
+        for allow in ${AGENT_ALLOW//,/ }; do
+            # A bare entry exempts the whole subtree, so `.claude` and
+            # `.claude/*` both mean what whoever wrote the input expects. `*`
+            # crosses `/` inside [[ == ]], so no globstar is involved.
+            # shellcheck disable=SC2053
+            if [[ "$p" == $allow || "$p" == $allow/* ]]; then ALLOWED=y; break; fi
+        done
+        [ -n "$ALLOWED" ] && continue
+        AGENT_N=$((AGENT_N + 1))
+        printf '%s\n' "$p" >> "$AGENT_FILE"
+    done < <(printf '%s\n' "$TREE" | grep -iE -- "$AGENT_RE")
+    # Every hit is recorded, uncapped, because the report does not show them
+    # one by one. A `.claude/` holding two hundred files is ONE thing to
+    # delete, not two hundred lines of verdict, so each path collapses to its
+    # artefact root and the roots are counted. MAX_REPORT then caps roots
+    # rather than files, which is what a reader was going to act on anyway.
+    # The per-file GitHub annotations below stay per-file: those anchor on the
+    # path and are read by a machine.
+    #
+    # The root is the SHORTEST PREFIX THAT STILL MATCHES, not the first
+    # dot-directory along the path, and the difference is not cosmetic. The
+    # fleet's devcontainer ships its agent configuration at
+    # `.devcontainer/images/.claude/…`; collapsing on the first dot-directory
+    # would name `.devcontainer/` as the thing to delete — a directory this
+    # gate promises never to touch, holding 400 files it has no quarrel with.
+    # A verdict that names the wrong directory is worse than none.
+    #
+    # tolower() on the candidate is how the case-insensitivity of the grep
+    # above is carried into awk, which has no equivalent flag. A pattern
+    # written with an uppercase letter would simply not collapse — the path is
+    # then reported whole, which is accurate, just longer.
+    if [ "$AGENT_N" -gt 0 ]; then
+        AGENT_ROOTS="$(awk -F/ -v re="$AGENT_RE" '{
+            r = ""; root = $0
+            for (i = 1; i <= NF; i++) {
+                r = (r == "" ? $i : r "/" $i)
+                cand = (i < NF ? r "/" : r)
+                if (tolower(cand) ~ re) { root = cand; break }
+            }
+            if (!(root in n)) order[++k] = root
+            n[root]++
+        }
+        END { for (j = 1; j <= k; j++) print n[order[j]] "\t" order[j] }' "$AGENT_FILE")"
+        AGENT_ROOT_N="$(printf '%s\n' "$AGENT_ROOTS" | wc -l)"
+    fi
+fi
+
 # --- Report -----------------------------------------------------------------
 esc() { printf '%s' "$1" | sed 's/|/\\|/g; s/`/ʼ/g'; }
 {
@@ -253,9 +355,11 @@ esc() { printf '%s' "$1" | sed 's/|/\\|/g; s/`/ʼ/g'; }
         echo "Attribution: **$ATTR_SCANNED** commit(s) in \`$RANGE\`."
     fi
     [ -n "$RANGE" ] && echo "Format: **$FMT_SCANNED** non-merge commit(s) in \`$RANGE\`. Secrets: added lines in \`$RANGE\`."
+    [ "$AGENT_FILES" = "true" ] && echo "Agent artefacts: paths tracked at \`${TREE_REV:0:12}\`."
     echo ""
-    if [ "$ATTR_N" -eq 0 ] && [ "$FMT_N" -eq 0 ] && [ "$SEC_N" -eq 0 ] && [ "$IDENT_N" -eq 0 ] && [ "$TRAIL_N" -eq 0 ]; then
-        echo "✅ Clean — allowed identities, no AI attribution, conventional subjects, no credentials added."
+    if [ "$ATTR_N" -eq 0 ] && [ "$FMT_N" -eq 0 ] && [ "$SEC_N" -eq 0 ] && [ "$IDENT_N" -eq 0 ] \
+       && [ "$TRAIL_N" -eq 0 ] && [ "$AGENT_N" -eq 0 ]; then
+        echo "✅ Clean — allowed identities, no AI attribution, conventional subjects, no credentials added, no agent artefacts tracked."
     fi
     if [ "$TRAIL_N" -gt 0 ]; then
         echo "### ❌ Foreign identity in a trailer — $TRAIL_N commit(s)"
@@ -325,6 +429,32 @@ esc() { printf '%s' "$1" | sed 's/|/\\|/g; s/`/ʼ/g'; }
         while IFS= read -r l; do printf -- '- `%s…`\n' "$(printf '%s' "$l" | cut -c1-40 | tr -d '`')"; done < "$SEC_FILE"
         echo ""
     fi
+    if [ "$AGENT_N" -gt 0 ]; then
+        echo "### ❌ Agent artefacts tracked — $AGENT_N file(s)"
+        echo ""
+        echo "An AI agent's tooling configuration does not belong in a repository."
+        echo "This is the same rejection policy the attribution rules apply to commit"
+        echo "messages, applied to what a change leaves on disk."
+        echo ""
+        while IFS=$'\t' read -r cnt root; do
+            [ -z "$root" ] && continue
+            if [ "$cnt" -gt 1 ]; then printf -- '- `%s` — %s file(s)\n' "$(esc "$root")" "$cnt"
+            else printf -- '- `%s`\n' "$(esc "$root")"; fi
+        done < <(printf '%s\n' "$AGENT_ROOTS" | head -n "$MAX_REPORT")
+        [ "$AGENT_ROOT_N" -gt "$MAX_REPORT" ] && echo "" && echo "_… and $((AGENT_ROOT_N - MAX_REPORT)) more._"
+        echo ""
+        echo "> Untrack them and commit — the file stays on your machine:"
+        echo "> \`git rm -r --cached <path>\` then add it to \`.gitignore\`."
+        echo "> **No history rewrite is needed**: this check reads the tree at the head,"
+        echo "> not the ancestry, so one commit clears it."
+        echo ">"
+        echo "> Editor configuration (\`.vscode/\`, \`.idea/\`), \`.devcontainer/\` itself and"
+        echo "> markdown instructions (\`CLAUDE.md\`, \`AGENTS.md\`) are never matched — but an"
+        echo "> agent directory nested inside one of them still is."
+        echo "> A repository that exists to distribute this configuration exempts the"
+        echo "> exact paths it ships with the \`agent_files_allow\` input."
+        echo ""
+    fi
 } > "$REPORT_BODY"
 cat "$REPORT_BODY" >> "$SUMMARY"
 [ -n "$REPORT" ] && cp "$REPORT_BODY" "$REPORT"
@@ -361,8 +491,21 @@ if [ "$SEC_N" -gt 0 ]; then
     RC=1
     echo "::error::$SEC_N added line(s) look like credentials"
 fi
+if [ "$AGENT_N" -gt 0 ]; then
+    RC=1
+    # file= makes GitHub anchor the annotation on the offending path itself,
+    # which is also the instruction: this is the file to remove.
+    while IFS= read -r a; do
+        echo "::error file=${a}::agent artefact tracked here — remove it (git rm -r --cached)"
+    done < <(head -n "$MAX_REPORT" "$AGENT_FILE")
+    echo "::error::$AGENT_N agent artefact file(s) tracked at ${TREE_REV:0:12} — no history rewrite needed, one commit removes them"
+fi
 
 if [ "$RC" -eq 0 ]; then
-    echo "✅ post-commit: $ATTR_SCANNED commit(s) attribution-free${IDENT_RE:+ and correctly attributed}, $FMT_SCANNED subject(s) conventional, no credentials added"
+    # PC_AGENT_FILES is "true" or "false" — both non-empty, so the claim is
+    # built from whether the check ran, not from the flag's truthiness.
+    AGENT_CLAIM=""
+    [ "$AGENT_FILES" = "true" ] && AGENT_CLAIM=", no agent artefacts tracked"
+    echo "✅ post-commit: $ATTR_SCANNED commit(s) attribution-free${IDENT_RE:+ and correctly attributed}, $FMT_SCANNED subject(s) conventional, no credentials added${AGENT_CLAIM}"
 fi
 exit "$RC"

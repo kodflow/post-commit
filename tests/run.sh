@@ -343,6 +343,97 @@ d=$(mkrepo); mkdir -p "$d/tests"; echo 'AKIAIOSFODNN7EXAMPLE' > "$d/tests/fixtur
 git -C "$d" add -A; git -C "$d" commit -qm "chore: config"
 check "a real path still fails even with a fixture alongside" 1 "$d"
 
+echo "== agent artefacts =="
+# The tree, not the range. Every case below commits with a conventional
+# subject and an allowed identity so that exit 1 can only mean this check.
+d=$(mkrepo); mkdir -p "$d/.claude"; echo '{}' > "$d/.claude/settings.json"
+git -C "$d" add -A; git -C "$d" commit -qm "chore: add agent config"
+check "a tracked .claude/ is refused" 1 "$d"
+
+d=$(mkrepo); mkdir -p "$d/.vscode"; echo '{}' > "$d/.vscode/settings.json"
+git -C "$d" add -A; git -C "$d" commit -qm "chore: editor settings"
+check ".vscode/ is editor config, not an agent" 0 "$d"
+
+d=$(mkrepo); mkdir -p "$d/.idea" "$d/.devcontainer"
+echo '<x/>' > "$d/.idea/workspace.xml"; echo '{}' > "$d/.devcontainer/devcontainer.json"
+git -C "$d" add -A; git -C "$d" commit -qm "chore: editor and environment"
+check ".idea/ and .devcontainer/ are kept" 0 "$d"
+
+# The scope decision of #21: markdown instructions read as project
+# documentation and 21 fleet repos carry one, so they are deliberately out.
+d=$(mkrepo); echo '# instructions' > "$d/CLAUDE.md"; echo '# agents' > "$d/AGENTS.md"
+git -C "$d" add -A; git -C "$d" commit -qm "docs: project instructions"
+check "CLAUDE.md and AGENTS.md are tolerated as documentation" 0 "$d"
+
+d=$(mkrepo); echo 'be nice' > "$d/.cursorrules"
+git -C "$d" add -A; git -C "$d" commit -qm "chore: cursor rules"
+check "a dotfile agent config is refused too" 1 "$d"
+
+d=$(mkrepo); echo 'chat' > "$d/.aider.chat.history.md"
+git -C "$d" add -A; git -C "$d" commit -qm "chore: leftovers"
+check "aider drops its history with a known prefix" 1 "$d"
+
+d=$(mkrepo); mkdir -p "$d/packages/app/.claude"; echo '{}' > "$d/packages/app/.claude/x.json"
+git -C "$d" add -A; git -C "$d" commit -qm "chore: nested agent config"
+check "a nested .claude/ is found, not just the root one" 1 "$d"
+
+# The whole point of reading the tree: the artefact arrives in an ancestor and
+# the range that adds it is long merged. A range-scoped check would call this
+# clean, which is exactly how the directory that prompted the rule survived.
+d=$(mkrepo); mkdir -p "$d/.claude"; echo '{}' > "$d/.claude/settings.json"
+git -C "$d" add -A; git -C "$d" commit -qm "chore: agent config"
+commit_msg "$d" "feat: unrelated later work"
+check "an artefact merged earlier still fails a later clean change" 1 "$d" PC_HISTORY=range
+
+# …and removing it is enough. No history rewrite, unlike an attribution.
+d=$(mkrepo); mkdir -p "$d/.claude"; echo '{}' > "$d/.claude/settings.json"
+git -C "$d" add -A; git -C "$d" commit -qm "chore: agent config"
+git -C "$d" rm -qr .claude; git -C "$d" commit -qm "chore: drop the agent config"
+check "removing it in one commit clears the check" 0 "$d"
+
+d=$(mkrepo); mkdir -p "$d/.claude"; echo '{}' > "$d/.claude/settings.json"
+git -C "$d" add -A; git -C "$d" commit -qm "chore: agent config"
+check "the check is switchable" 0 "$d" PC_AGENT_FILES=false
+
+# A repository whose purpose is to distribute this config exempts its paths.
+d=$(mkrepo); mkdir -p "$d/.claude"; echo '{}' > "$d/.claude/settings.json"
+git -C "$d" add -A; git -C "$d" commit -qm "chore: agent config"
+check "a bare allow entry exempts the whole subtree" 0 "$d" PC_AGENT_ALLOW=.claude
+
+d=$(mkrepo); mkdir -p "$d/.claude" "$d/.cursor"
+echo '{}' > "$d/.claude/settings.json"; echo '{}' > "$d/.cursor/rules.json"
+git -C "$d" add -A; git -C "$d" commit -qm "chore: two agents"
+check "an allow entry exempts only what it names" 1 "$d" PC_AGENT_ALLOW=".claude/*"
+
+# The verdict names the artefact root, and getting that root wrong is worse
+# than not collapsing at all: the fleet's devcontainer ships its agent config
+# at .devcontainer/images/.claude/, and naming `.devcontainer/` as the thing to
+# delete would point at 400 files the gate has no quarrel with.
+d=$(mkrepo); mkdir -p "$d/.devcontainer/images/.claude"
+echo '{}' > "$d/.devcontainer/images/.claude/settings.json"
+echo '{}' > "$d/.devcontainer/devcontainer.json"
+git -C "$d" add -A; git -C "$d" commit -qm "chore: devcontainer with agent config"
+r="$(mktemp)"
+( cd "$d" && env GITHUB_STEP_SUMMARY=/dev/null PC_REPORT="$r" bash "$GATE" HEAD HEAD~1..HEAD ) >/dev/null 2>&1
+if grep -qF '`.devcontainer/images/.claude/`' "$r" && ! grep -qF '`.devcontainer/` —' "$r"; then
+    PASS=$((PASS+1)); printf '  ok   %s\n' "the reported root is the artefact, not the .devcontainer around it"
+else
+    FAIL=$((FAIL+1)); printf '  FAIL %s\n%s\n' "the reported root is the artefact, not the .devcontainer around it" "$(sed 's/^/       /' "$r")"
+fi
+rm -rf "$d" "$r"
+
+# The whole-repository scope (push, manual runs) is not a tree-ish; the check
+# has to fall back to the checked-out head rather than fail the job.
+d=$(mkrepo); mkdir -p "$d/.claude"; echo '{}' > "$d/.claude/settings.json"
+git -C "$d" add -A; git -C "$d" commit -qm "chore: agent config"
+out="$(cd "$d" && env GITHUB_STEP_SUMMARY=/dev/null bash "$GATE" --branches 2>&1)"; rc=$?
+if [ "$rc" -eq 1 ] && printf '%s' "$out" | grep -q 'agent artefact'; then
+    PASS=$((PASS+1)); printf '  ok   %s\n' "--branches scans the checked-out tree"
+else
+    FAIL=$((FAIL+1)); printf '  FAIL %s (want exit 1 and an artefact error, got %s)\n' "--branches scans the checked-out tree" "$rc"
+fi
+rm -rf "$d"
+
 echo "== usage errors (expect 2) =="
 d=$(mkrepo)
 out="$(cd "$d" && bash "$GATE" 2>&1)"; rc=$?
