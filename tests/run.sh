@@ -430,8 +430,14 @@ printf 'x' > "$d/a\$(touch PWNED).d/.mcp.json"
 printf 'x' > "$d/c];touch PWNED3;x[.d/.mcp.json"
 git -C "$d" add -A; git -C "$d" commit -qm "chore: hostile parent names"
 ( cd "$d" && env GITHUB_STEP_SUMMARY=/dev/null bash "$GATE" HEAD HEAD~1..HEAD ) >/dev/null 2>&1
-if [ ! -e "$d/PWNED" ] && [ ! -e "$d/PWNED3" ]; then
+rc=$?
+# The exit status belongs in the assertion: "nothing was executed" is also true
+# of a scan that matched nothing, so without it a regression in the matching
+# would leave this test green while proving only that a clean run is harmless.
+if [ "$rc" -eq 1 ] && [ ! -e "$d/PWNED" ] && [ ! -e "$d/PWNED3" ]; then
     PASS=$((PASS+1)); printf '  ok   %s\n' "a hostile file name is data, never evaluated"
+elif [ "$rc" -ne 1 ]; then
+    FAIL=$((FAIL+1)); printf '  FAIL %s — the gate did not refuse them (exit %s)\n' "a hostile file name is data, never evaluated" "$rc"
 else
     FAIL=$((FAIL+1)); printf '  FAIL %s — the scan executed part of a path\n' "a hostile file name is data, never evaluated"
 fi
