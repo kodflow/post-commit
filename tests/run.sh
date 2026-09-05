@@ -501,10 +501,13 @@ rm -rf "$d"
 # guard pass on the explanation alone.
 calls="$(grep -c 'post-commit.sh" --branches' "$ROOT/scripts/rewrite-history.sh")"
 guarded="$(grep 'post-commit.sh" --branches' "$ROOT/scripts/rewrite-history.sh" | grep -c 'PC_AGENT_FILES=false')"
-if [ "$calls" -gt 0 ] && [ "$guarded" -eq "$calls" ]; then
+# Two, not "at least one": the before scan feeds the tainted/identity counters
+# the report prints, and the after scan is what --execute consults before force
+# pushing. Losing either is a silent regression that `-gt 0` would wave through.
+if [ "$calls" -eq 2 ] && [ "$guarded" -eq 2 ]; then
     PASS=$((PASS+1)); printf '  ok   %s\n' "every rewrite-history gate call disables the artefact check"
 else
-    FAIL=$((FAIL+1)); printf '  FAIL %s (%s call(s), %s guarded)\n' "every rewrite-history gate call disables the artefact check" "$calls" "$guarded"
+    FAIL=$((FAIL+1)); printf '  FAIL %s (want 2 call(s) all guarded, got %s call(s), %s guarded)\n' "every rewrite-history gate call disables the artefact check" "$calls" "$guarded"
 fi
 
 echo "== usage errors (expect 2) =="
