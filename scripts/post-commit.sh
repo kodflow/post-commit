@@ -26,13 +26,14 @@
 #   4. format      — conventional-commit subject on the range's non-merge
 #                    commits (project convention, see devcontainer-template).
 #   5. secrets     — no credential-shaped ADDED lines in the range's diff.
-#   6. artefacts   — no AI agent's tooling configuration TRACKED in the tree at
-#                    the head (.claude/, .cursor/, .aider.*, …). The tree and
-#                    not the range: the directory this rule exists to remove
-#                    was merged long before the rule existed, and a range check
-#                    would call every later pull request clean while it sat
-#                    there. Editor configuration is untouched — an editor is
-#                    not an agent.
+#   6. artefacts   — nothing an AI agent WROTE is TRACKED in the tree at the
+#                    head: session logs, chat transcripts, plan files, locks,
+#                    caches, the credentials store, personal overrides. Its
+#                    CONFIGURATION is source and is never matched —
+#                    .claude/agents/, commands/, skills/, settings.json,
+#                    .mcp.json, .cursorrules. The tree and not the range: an
+#                    artefact merged before the rule existed would otherwise
+#                    leave every later pull request clean while it sat there.
 #
 # Deliberately NOT here: lint/build/test. Every repo's own CI already runs
 # those server-side, so --no-verify never bypassed them in the first place.
@@ -273,11 +274,17 @@ if [ "$SECRETS" = "true" ] && [ -n "$RANGE" ]; then
 fi
 
 # --- 4. Agent artefacts (the tree at the head) -------------------------------
-# Scope is the tree, not the range, and that is the whole point. The `.claude/`
-# that prompted this rule was merged into a trunk months before the rule
-# existed; a range check sees only what a change adds, so every later pull
-# request would have been called clean while the directory sat there. Reading
-# the tracked paths means the gate stays red until it is actually gone.
+# What an agent WROTE, never what a human wrote for it. The configuration is
+# source — someone authored `.claude/agents/`, reviewed it, and wants the next
+# person who clones to have it. The exhaust is not: a session log, a
+# transcript, a plan, a lock, a cache, a credentials store, a personal
+# override. See agent-paths.txt for where exactly the line falls and for the
+# fleet measurements that put it there.
+#
+# Scope is the tree, not the range, and that is the point. The artefact that
+# prompted this rule was merged into a trunk long before the rule existed; a
+# range check sees only what a change adds, so every later pull request would
+# have been called clean while it sat there.
 #
 # Which it can afford to be, because gone is cheap here. A tainted commit
 # message needs rewrite-history.sh and new SHAs for every descendant; a tracked
@@ -454,9 +461,9 @@ esc_prop() {
     if [ "$AGENT_N" -gt 0 ]; then
         echo "### ❌ Agent artefacts tracked — $AGENT_N file(s)"
         echo ""
-        echo "An AI agent's tooling configuration does not belong in a repository."
-        echo "This is the same rejection policy the attribution rules apply to commit"
-        echo "messages, applied to what a change leaves on disk."
+        echo "These are files an agent WROTE — a session log, a transcript, a plan,"
+        echo "a lock, a cache, a personal override. Nobody reviews them, they conflict"
+        echo "on every merge, and they carry whatever the session happened to touch."
         echo ""
         shown=0
         for root in ${AGENT_ROOT_ORDER[@]+"${AGENT_ROOT_ORDER[@]}"}; do
@@ -478,11 +485,11 @@ esc_prop() {
         echo "> **No history rewrite is needed**: this check reads the tree at the head,"
         echo "> not the ancestry, so one commit clears it."
         echo ">"
-        echo "> Editor configuration (\`.vscode/\`, \`.idea/\`), \`.devcontainer/\` itself and"
-        echo "> markdown instructions (\`CLAUDE.md\`, \`AGENTS.md\`) are never matched — but an"
-        echo "> agent directory nested inside one of them still is."
-        echo "> A repository that exists to distribute this configuration exempts the"
-        echo "> exact paths it ships with the \`agent_files_allow\` input."
+        echo "> The agent's **configuration is source and is never matched**:"
+        echo "> \`.claude/agents/\`, \`commands/\`, \`skills/\`, \`settings.json\`, \`.mcp.json\`,"
+        echo "> \`.cursorrules\` — and editor config and \`CLAUDE.md\` alongside them."
+        echo "> Only the listed runtime directories and filenames are refused, wherever"
+        echo "> they sit. \`agent_files_allow\` exempts a path if one is genuinely wanted."
         echo ""
     fi
 } > "$REPORT_BODY"

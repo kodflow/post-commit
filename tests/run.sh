@@ -19,6 +19,12 @@ mkrepo() {
     git -C "$d" config user.name "Dev"
     git -C "$d" config commit.gpgsign false
     git -C "$d" config core.hooksPath /dev/null   # immune to the host's global hooks
+    # …and to its global gitignore. This machine's carries
+    # `**/.claude/settings.local.json`, so three cases silently tested nothing:
+    # the file was created, never tracked, and the gate correctly found an empty
+    # tree. A test repo must be built from what the case writes, not from what
+    # the developer running it happens to exclude.
+    git -C "$d" config core.excludesFile /dev/null
     echo seed > "$d/seed.txt"
     git -C "$d" add -A
     git -C "$d" commit -qm "chore: seed"
@@ -343,81 +349,201 @@ d=$(mkrepo); mkdir -p "$d/tests"; echo 'AKIAIOSFODNN7EXAMPLE' > "$d/tests/fixtur
 git -C "$d" add -A; git -C "$d" commit -qm "chore: config"
 check "a real path still fails even with a fixture alongside" 1 "$d"
 
-echo "== agent artefacts =="
-# The tree, not the range. Every case below commits with a conventional
-# subject and an allowed identity so that exit 1 can only mean this check.
-d=$(mkrepo); mkdir -p "$d/.claude"; echo '{}' > "$d/.claude/settings.json"
-git -C "$d" add -A; git -C "$d" commit -qm "chore: add agent config"
-check "a tracked .claude/ is refused" 1 "$d"
+echo "== agent artefacts: configuration is source, exhaust is not =="
+# The rule refuses what an agent WRITES, not what a human wrote for it. These
+# first cases are the ones a repository is entitled to carry.
+d=$(mkrepo); mkdir -p "$d/.claude/agents" "$d/.claude/commands" "$d/.claude/skills"
+echo '{}' > "$d/.claude/settings.json"; echo '# a' > "$d/.claude/agents/reviewer.md"
+echo '# c' > "$d/.claude/commands/ship.md"; echo '# s' > "$d/.claude/skills/deploy.md"
+echo '{}' > "$d/.mcp.json"
+git -C "$d" add -A; git -C "$d" commit -qm "chore: agent configuration"
+check "settings, agents, commands, skills and .mcp.json are source" 0 "$d"
 
-d=$(mkrepo); mkdir -p "$d/.vscode"; echo '{}' > "$d/.vscode/settings.json"
-git -C "$d" add -A; git -C "$d" commit -qm "chore: editor settings"
-check ".vscode/ is editor config, not an agent" 0 "$d"
+# Both of these are real fleet content, and both would fall to a lazier rule:
+# routing-table.jsonl to "a .jsonl under an agent directory is a log" (tracked
+# in 4 repos), .gitkeep to matching `sessions/` (tracked in 14).
+d=$(mkrepo); mkdir -p "$d/.claude/agents" "$d/.claude/sessions"
+echo '{"a":1}' > "$d/.claude/agents/routing-table.jsonl"
+: > "$d/.claude/sessions/.gitkeep"
+git -C "$d" add -A; git -C "$d" commit -qm "chore: authored jsonl and an empty session dir"
+check "an authored .jsonl and a sessions placeholder are kept" 0 "$d"
 
-d=$(mkrepo); mkdir -p "$d/.idea" "$d/.devcontainer"
-echo '<x/>' > "$d/.idea/workspace.xml"; echo '{}' > "$d/.devcontainer/devcontainer.json"
-git -C "$d" add -A; git -C "$d" commit -qm "chore: editor and environment"
-check ".idea/ and .devcontainer/ are kept" 0 "$d"
+d=$(mkrepo); mkdir -p "$d/.cursor/rules"
+echo 'be nice' > "$d/.cursorrules"; echo '---' > "$d/.cursor/rules/style.mdc"
+echo 'model: gpt' > "$d/.aider.conf.yml"; echo '{}' > "$d/.roomodes"
+git -C "$d" add -A; git -C "$d" commit -qm "chore: other tools' configuration"
+check "every other tool's configuration is kept too" 0 "$d"
 
-# The scope decision of #21: markdown instructions read as project
-# documentation and 21 fleet repos carry one, so they are deliberately out.
 d=$(mkrepo); echo '# instructions' > "$d/CLAUDE.md"; echo '# agents' > "$d/AGENTS.md"
-git -C "$d" add -A; git -C "$d" commit -qm "docs: project instructions"
-check "CLAUDE.md and AGENTS.md are tolerated as documentation" 0 "$d"
+mkdir -p "$d/.vscode" "$d/.idea" "$d/.devcontainer"
+echo '{}' > "$d/.vscode/settings.json"; echo '<x/>' > "$d/.idea/workspace.xml"
+echo '{}' > "$d/.devcontainer/devcontainer.json"
+git -C "$d" add -A; git -C "$d" commit -qm "docs: instructions and editor config"
+check "documentation and editor config are untouched" 0 "$d"
 
-d=$(mkrepo); echo 'be nice' > "$d/.cursorrules"
-git -C "$d" add -A; git -C "$d" commit -qm "chore: cursor rules"
-check "a dotfile agent config is refused too" 1 "$d"
+echo "== agent artefacts: the exhaust (expect 1) =="
+d=$(mkrepo); mkdir -p "$d/.claude/logs"; echo '{"e":1}' > "$d/.claude/logs/session.jsonl"
+git -C "$d" add -A; git -C "$d" commit -qm "chore: a session log"
+check "a session log is refused" 1 "$d"
+
+d=$(mkrepo); mkdir -p "$d/.claude/plans"; echo '# plan' > "$d/.claude/plans/thing.md"
+git -C "$d" add -A; git -C "$d" commit -qm "chore: a plan file"
+check "a plan file is refused" 1 "$d"
+
+# One developer's permissions, imposed on everybody who clones.
+d=$(mkrepo); mkdir -p "$d/.claude"; echo '{}' > "$d/.claude/settings.local.json"
+git -C "$d" add -A; git -C "$d" commit -qm "chore: local overrides"
+check "a personal settings.local.json is refused" 1 "$d"
+
+d=$(mkrepo); mkdir -p "$d/.claude"; : > "$d/.claude/scheduled_tasks.lock"
+echo '{}' > "$d/.claude/history.jsonl"
+git -C "$d" add -A; git -C "$d" commit -qm "chore: a lock and a history"
+check "a lock file and history.jsonl are refused" 1 "$d"
+
+# The worst thing a `.claude/` can carry, and the one the secrets check cannot
+# save you from: it reads only the lines a push ADDS, so a credentials file
+# committed once is never looked at again.
+d=$(mkrepo); mkdir -p "$d/.claude"; echo '{"t":"x"}' > "$d/.claude/.credentials.json"
+git -C "$d" add -A; git -C "$d" commit -qm "chore: oauth token store"
+check "a committed credentials file is refused" 1 "$d"
+
+d=$(mkrepo); mkdir -p "$d/.claude"
+echo '{}' > "$d/.claude/policy-limits.json"; echo '{}' > "$d/.claude/remote-settings.json"
+git -C "$d" add -A; git -C "$d" commit -qm "chore: machine state"
+check "server-pushed machine state is refused" 1 "$d"
 
 d=$(mkrepo); echo 'chat' > "$d/.aider.chat.history.md"
-git -C "$d" add -A; git -C "$d" commit -qm "chore: leftovers"
-check "aider drops its history with a known prefix" 1 "$d"
+git -C "$d" add -A; git -C "$d" commit -qm "chore: aider transcript"
+check "aider's transcript is refused while its conf is not" 1 "$d"
 
-d=$(mkrepo); mkdir -p "$d/packages/app/.claude"; echo '{}' > "$d/packages/app/.claude/x.json"
-git -C "$d" add -A; git -C "$d" commit -qm "chore: nested agent config"
-check "a nested .claude/ is found, not just the root one" 1 "$d"
+# aider names the cache directory after the cache FORMAT VERSION
+# (`TAGS_CACHE_DIR = f".aider.tags.cache.v{CACHE_VERSION}"`), so a bare
+# `.aider.tags.cache` never exists. Anchoring that pattern with `$` — which
+# reads like an obvious tightening — would match nothing and retire the rule.
+d=$(mkrepo); mkdir -p "$d/.aider.tags.cache.v3"; echo 'x' > "$d/.aider.tags.cache.v3/cache.db"
+git -C "$d" add -A; git -C "$d" commit -qm "chore: aider tag cache"
+check "the version-suffixed tag cache is refused" 1 "$d"
 
-# The whole point of reading the tree: the artefact arrives in an ancestor and
-# the range that adds it is long merged. A range-scoped check would call this
-# clean, which is exactly how the directory that prompted the rule survived.
-d=$(mkrepo); mkdir -p "$d/.claude"; echo '{}' > "$d/.claude/settings.json"
-git -C "$d" add -A; git -C "$d" commit -qm "chore: agent config"
+d=$(mkrepo); mkdir -p "$d/.specstory/history"; echo 'chat' > "$d/.specstory/history/2026-01-01.md"
+git -C "$d" add -A; git -C "$d" commit -qm "chore: recorded chat"
+check "a recorded chat transcript is refused" 1 "$d"
+
+d=$(mkrepo); mkdir -p "$d/.continue/sessions" "$d/.goose/logs"
+echo '{}' > "$d/.continue/sessions/a.json"; echo 'x' > "$d/.goose/logs/a.log"
+git -C "$d" add -A; git -C "$d" commit -qm "chore: other tools' exhaust"
+check "other tools' session and log directories are refused" 1 "$d"
+
+# The devcontainer image carries a whole .claude/ tree; a log dropped inside it
+# is still a log, and nothing is spared for sitting under .devcontainer/.
+d=$(mkrepo); mkdir -p "$d/.devcontainer/images/.claude/logs" "$d/.devcontainer/images/.claude/agents"
+echo '# a' > "$d/.devcontainer/images/.claude/agents/x.md"
+echo '{}' > "$d/.devcontainer/images/.claude/logs/session.jsonl"
+git -C "$d" add -A; git -C "$d" commit -qm "chore: image payload with a stray log"
+check "a log nested in the devcontainer payload is still refused" 1 "$d"
+
+echo "== agent artefacts: one case per pattern, both ways =="
+# Exhaustive by construction rather than by discipline. Every pattern in
+# agent-paths.txt gets a representative path here, and the assertion names the
+# ones that went dark — so adding a pattern without a case, or breaking one
+# nobody happened to exercise, fails loudly instead of quietly.
+REFUSED=(
+    .claude/logs/a.jsonl .claude/plans/p.md .claude/todos/t.json
+    .claude/shell-snapshots/s.sh .claude/statsig/s.json .claude/paste-cache/p
+    .claude/session-env/e .claude/backups/b .claude/downloads/d
+    .claude/projects/p .claude/ide/i .claude/chrome/c
+    .claude/history.jsonl .claude/.credentials.json
+    .claude/policy-limits.json .claude/remote-settings.json
+    .claude/scheduled_tasks.lock .claude/settings.local.json
+    .claude/settings.json.bak-20260101
+    .aider.chat.history.md .aider.input.history .aider.llm.history
+    .aider.tags.cache.v3/cache.db
+    .specstory/history/2026-01-01.md
+    .continue/sessions/a.json .continue/index/a .continue/dev_data/a
+    .goose/sessions/a .goose/logs/a.log
+    .amazonq/cache/a .codeium/cache/a .qodo/cache/a .qodo/history/a
+    .cursor/mcp.local.json
+)
+d=$(mkrepo)
+for f in "${REFUSED[@]}"; do mkdir -p "$d/$(dirname "$f")"; echo x > "$d/$f"; done
+git -C "$d" add -A; git -C "$d" commit -qm "chore: one artefact per pattern"
+out="$(cd "$d" && env GITHUB_STEP_SUMMARY=/dev/null bash "$GATE" HEAD HEAD~1..HEAD 2>&1)"
+missed=""
+for f in "${REFUSED[@]}"; do
+    printf '%s' "$out" | grep -qF "file=$f" || missed="${missed:+$missed }$f"
+done
+if [ -z "$missed" ]; then
+    PASS=$((PASS+1)); printf '  ok   %s (%s paths)\n' "every pattern refuses its own artefact" "${#REFUSED[@]}"
+else
+    FAIL=$((FAIL+1)); printf '  FAIL %s — not matched: %s\n' "every pattern refuses its own artefact" "$missed"
+fi
+rm -rf "$d"
+
+# The other half of the contract, and the half that matters more: everything a
+# human authored for the agent stays. A pattern that grows a little too wide
+# lands here rather than on a repository's pull requests.
+ALLOWED=(
+    .claude/agents/reviewer.md .claude/agents/routing-table.jsonl
+    .claude/commands/ship.md .claude/skills/deploy.md .claude/docs/pattern.md
+    .claude/scripts/hook.sh .claude/templates/t.tpl .claude/workflows/w.yml
+    .claude/settings.json .claude/.claude.json .claude/features.json
+    .claude/sessions/.gitkeep .claude/db
+    .mcp.json .cursorrules .cursor/rules/style.mdc
+    .aider.conf.yml .aider.model.settings.yml .aider.model.metadata.json
+    .roomodes .clinerules .windsurfrules .codex/config.toml .gemini/settings.json
+    CLAUDE.md AGENTS.md GEMINI.md
+    .vscode/settings.json .idea/workspace.xml .devcontainer/devcontainer.json
+)
+d=$(mkrepo)
+for f in "${ALLOWED[@]}"; do mkdir -p "$d/$(dirname "$f")"; echo x > "$d/$f"; done
+git -C "$d" add -A; git -C "$d" commit -qm "chore: everything a human authored"
+check "no authored file is ever refused (${#ALLOWED[@]} paths)" 0 "$d"
+
+echo "== agent artefacts: scope, exemptions and reporting =="
+# The tree, not the range: the artefact arrives in an ancestor and the change
+# that added it is long merged. A range-scoped check would call this clean.
+d=$(mkrepo); mkdir -p "$d/.claude/logs"; echo '{}' > "$d/.claude/logs/a.jsonl"
+git -C "$d" add -A; git -C "$d" commit -qm "chore: a session log"
 commit_msg "$d" "feat: unrelated later work"
 check "an artefact merged earlier still fails a later clean change" 1 "$d" PC_HISTORY=range
 
-# …and removing it is enough. No history rewrite, unlike an attribution.
-d=$(mkrepo); mkdir -p "$d/.claude"; echo '{}' > "$d/.claude/settings.json"
-git -C "$d" add -A; git -C "$d" commit -qm "chore: agent config"
-git -C "$d" rm -qr .claude; git -C "$d" commit -qm "chore: drop the agent config"
+d=$(mkrepo); mkdir -p "$d/.claude/logs"; echo '{}' > "$d/.claude/logs/a.jsonl"
+git -C "$d" add -A; git -C "$d" commit -qm "chore: a session log"
+git -C "$d" rm -qr .claude/logs; git -C "$d" commit -qm "chore: untrack the logs"
 check "removing it in one commit clears the check" 0 "$d"
 
-d=$(mkrepo); mkdir -p "$d/.claude"; echo '{}' > "$d/.claude/settings.json"
-git -C "$d" add -A; git -C "$d" commit -qm "chore: agent config"
+d=$(mkrepo); mkdir -p "$d/.claude/logs"; echo '{}' > "$d/.claude/logs/a.jsonl"
+git -C "$d" add -A; git -C "$d" commit -qm "chore: a session log"
 check "the check is switchable" 0 "$d" PC_AGENT_FILES=false
 
-# A repository whose purpose is to distribute this config exempts its paths.
-d=$(mkrepo); mkdir -p "$d/.claude"; echo '{}' > "$d/.claude/settings.json"
-git -C "$d" add -A; git -C "$d" commit -qm "chore: agent config"
-check "a bare allow entry exempts the whole subtree" 0 "$d" PC_AGENT_ALLOW=.claude
+d=$(mkrepo); mkdir -p "$d/.claude/logs"; echo '{}' > "$d/.claude/logs/a.jsonl"
+git -C "$d" add -A; git -C "$d" commit -qm "chore: a session log"
+check "a bare allow entry exempts the whole subtree" 0 "$d" PC_AGENT_ALLOW=.claude/logs
 
-d=$(mkrepo); mkdir -p "$d/.claude" "$d/.cursor"
-echo '{}' > "$d/.claude/settings.json"; echo '{}' > "$d/.cursor/rules.json"
-git -C "$d" add -A; git -C "$d" commit -qm "chore: two agents"
-check "an allow entry exempts only what it names" 1 "$d" PC_AGENT_ALLOW=".claude/*"
+# `.claude/logs/*` must cover hidden files too. An unquoted expansion would
+# glob it against the working tree first, and filename globbing skips leading
+# dots — so this passed for a.jsonl and quietly failed for .hidden.jsonl.
+d=$(mkrepo); mkdir -p "$d/.claude/logs"
+echo '{}' > "$d/.claude/logs/a.jsonl"; echo '{}' > "$d/.claude/logs/.hidden.jsonl"
+git -C "$d" add -A; git -C "$d" commit -qm "chore: logs including a hidden one"
+check "a glob allow entry covers hidden files too" 0 "$d" PC_AGENT_ALLOW=".claude/logs/*"
+
+d=$(mkrepo); mkdir -p "$d/.claude/logs" "$d/.claude/plans"
+echo '{}' > "$d/.claude/logs/a.jsonl"; echo '#' > "$d/.claude/plans/p.md"
+git -C "$d" add -A; git -C "$d" commit -qm "chore: logs and plans"
+check "an allow entry exempts only what it names" 1 "$d" PC_AGENT_ALLOW=".claude/logs/*"
 
 # git C-quotes a path holding a non-ASCII or control character unless asked for
 # NUL-delimited output, and the quote it adds lands exactly where `(^|/)` and
-# `$` need a path boundary. Before the fix these three were reported clean —
-# naming every file in `.claude/` with an accent evaded the whole rule.
-d=$(mkrepo); mkdir -p "$d/.claude"; echo '{}' > "$d/.claude/naïve.md"
-git -C "$d" add -A; git -C "$d" commit -qm "chore: accented name inside the artefact"
+# `$` need a path boundary. Before that fix these were reported clean.
+d=$(mkrepo); mkdir -p "$d/.claude/logs"; echo '{}' > "$d/.claude/logs/naïve.jsonl"
+git -C "$d" add -A; git -C "$d" commit -qm "chore: accented log name"
 check "a non-ASCII file name does not evade the scan" 1 "$d"
 
-d=$(mkrepo); mkdir -p "$d/déjà"; echo '{}' > "$d/déjà/.mcp.json"
+d=$(mkrepo); mkdir -p "$d/déjà/.claude"; echo '{}' > "$d/déjà/.claude/settings.local.json"
 git -C "$d" add -A; git -C "$d" commit -qm "chore: anchored artefact below a non-ASCII parent"
 check "an end-anchored pattern still matches below a non-ASCII parent" 1 "$d"
 
-d=$(mkrepo); mkdir -p "$d/.claude"; echo '{}' > "$d/.claude/$(printf 'two\nlines').md"
+d=$(mkrepo); mkdir -p "$d/.claude/logs"; echo '{}' > "$d/.claude/logs/$(printf 'two\nlines').jsonl"
 git -C "$d" add -A; git -C "$d" commit -qm "chore: newline in the file name"
 check "a newline in the file name does not split a record" 1 "$d"
 
@@ -425,9 +551,9 @@ check "a newline in the file name does not split a record" 1 "$d"
 # array subscript, a [[ ]] operand and an annotation. `declare -A` is what makes
 # the subscript a string rather than an arithmetic expression; this is here so
 # that dropping the -A, or reaching for an indexed array, fails loudly.
-d=$(mkrepo); mkdir -p "$d/a\$(touch PWNED).d" "$d/c];touch PWNED3;x[.d"
-printf 'x' > "$d/a\$(touch PWNED).d/.mcp.json"
-printf 'x' > "$d/c];touch PWNED3;x[.d/.mcp.json"
+d=$(mkrepo); mkdir -p "$d/a\$(touch PWNED).d/.claude" "$d/c];touch PWNED3;x[.d/.claude"
+printf 'x' > "$d/a\$(touch PWNED).d/.claude/settings.local.json"
+printf 'x' > "$d/c];touch PWNED3;x[.d/.claude/settings.local.json"
 git -C "$d" add -A; git -C "$d" commit -qm "chore: hostile parent names"
 ( cd "$d" && env GITHUB_STEP_SUMMARY=/dev/null bash "$GATE" HEAD HEAD~1..HEAD ) >/dev/null 2>&1
 rc=$?
@@ -443,25 +569,15 @@ else
 fi
 rm -rf "$d"
 
-# `.claude/*` must exempt what is under `.claude/`, hidden files included. An
-# unquoted expansion would glob it against the working tree first, and bash's
-# filename globbing skips leading dots — so this passed for settings.json and
-# quietly failed for .mcp.json next to it.
-d=$(mkrepo); mkdir -p "$d/.claude"
-echo '{}' > "$d/.claude/settings.json"; echo '{}' > "$d/.claude/.mcp.json"
-git -C "$d" add -A; git -C "$d" commit -qm "chore: agent config with a hidden file"
-check "a glob allow entry covers hidden files too" 0 "$d" PC_AGENT_ALLOW=".claude/*"
-
-# The root is found with the pattern list, so the pattern list has to reach awk
-# intact. On an awk that strips the escape from a -v value, `\.` becomes a bare
-# `.`, `aclaude/` matches `(^|/).claude/`, and the verdict names an ordinary
-# directory as the thing to delete.
-d=$(mkrepo); mkdir -p "$d/aclaude/.claude"
-echo '{}' > "$d/aclaude/.claude/settings.json"
-git -C "$d" add -A; git -C "$d" commit -qm "chore: agent config below a lookalike"
+# The root is found with the pattern list, so the pattern list has to reach the
+# matcher intact. With the escape stripped, `\.` becomes a bare `.`, `aclaude/`
+# matches `(^|/).claude/logs/`, and the verdict names an ordinary directory.
+d=$(mkrepo); mkdir -p "$d/aclaude/.claude/logs"
+echo '{}' > "$d/aclaude/.claude/logs/a.jsonl"
+git -C "$d" add -A; git -C "$d" commit -qm "chore: log below a lookalike"
 r="$(mktemp)"
 ( cd "$d" && env GITHUB_STEP_SUMMARY=/dev/null PC_REPORT="$r" bash "$GATE" HEAD HEAD~1..HEAD ) >/dev/null 2>&1
-if grep -qF '`aclaude/.claude/`' "$r" && ! grep -qF '`aclaude/`' "$r"; then
+if grep -qF '`aclaude/.claude/logs/`' "$r" && ! grep -qF '`aclaude/`' "$r"; then
     PASS=$((PASS+1)); printf '  ok   %s\n' "a directory whose name merely ends in the pattern is not the root"
 else
     FAIL=$((FAIL+1)); printf '  FAIL %s\n%s\n' "a directory whose name merely ends in the pattern is not the root" "$(sed 's/^/       /' "$r")"
@@ -469,26 +585,25 @@ fi
 rm -rf "$d" "$r"
 
 # The verdict names the artefact root, and getting that root wrong is worse
-# than not collapsing at all: the fleet's devcontainer ships its agent config
-# at .devcontainer/images/.claude/, and naming `.devcontainer/` as the thing to
-# delete would point at 400 files the gate has no quarrel with.
-d=$(mkrepo); mkdir -p "$d/.devcontainer/images/.claude"
-echo '{}' > "$d/.devcontainer/images/.claude/settings.json"
-echo '{}' > "$d/.devcontainer/devcontainer.json"
-git -C "$d" add -A; git -C "$d" commit -qm "chore: devcontainer with agent config"
+# than not collapsing at all: the surrounding `.claude/` is legitimate here, so
+# naming it as the thing to delete would point at the agent's own source.
+d=$(mkrepo); mkdir -p "$d/.claude/logs" "$d/.claude/agents"
+echo '# a' > "$d/.claude/agents/x.md"
+for i in 1 2 3; do echo '{}' > "$d/.claude/logs/a$i.jsonl"; done
+git -C "$d" add -A; git -C "$d" commit -qm "chore: agent source beside its logs"
 r="$(mktemp)"
 ( cd "$d" && env GITHUB_STEP_SUMMARY=/dev/null PC_REPORT="$r" bash "$GATE" HEAD HEAD~1..HEAD ) >/dev/null 2>&1
-if grep -qF '`.devcontainer/images/.claude/`' "$r" && ! grep -qF '`.devcontainer/` —' "$r"; then
-    PASS=$((PASS+1)); printf '  ok   %s\n' "the reported root is the artefact, not the .devcontainer around it"
+if grep -qF '`.claude/logs/` — 3 file(s)' "$r" && ! grep -qF '`.claude/`' "$r"; then
+    PASS=$((PASS+1)); printf '  ok   %s\n' "the reported root is the log directory, not the .claude around it"
 else
-    FAIL=$((FAIL+1)); printf '  FAIL %s\n%s\n' "the reported root is the artefact, not the .devcontainer around it" "$(sed 's/^/       /' "$r")"
+    FAIL=$((FAIL+1)); printf '  FAIL %s\n%s\n' "the reported root is the log directory, not the .claude around it" "$(sed 's/^/       /' "$r")"
 fi
 rm -rf "$d" "$r"
 
 # The whole-repository scope (push, manual runs) is not a tree-ish; the check
 # has to fall back to the checked-out head rather than fail the job.
-d=$(mkrepo); mkdir -p "$d/.claude"; echo '{}' > "$d/.claude/settings.json"
-git -C "$d" add -A; git -C "$d" commit -qm "chore: agent config"
+d=$(mkrepo); mkdir -p "$d/.claude/logs"; echo '{}' > "$d/.claude/logs/a.jsonl"
+git -C "$d" add -A; git -C "$d" commit -qm "chore: a session log"
 out="$(cd "$d" && env GITHUB_STEP_SUMMARY=/dev/null bash "$GATE" --branches 2>&1)"; rc=$?
 if [ "$rc" -eq 1 ] && printf '%s' "$out" | grep -q 'agent artefact'; then
     PASS=$((PASS+1)); printf '  ok   %s\n' "--branches scans the checked-out tree"
@@ -498,23 +613,23 @@ fi
 rm -rf "$d"
 
 # rewrite-history.sh keeps the artefact check off on both of its gate calls: it
-# rewrites messages and identities and never touches the tree, so a tracked
-# `.claude/` would make --execute refuse to push a correct rewrite. Running the
-# script itself needs a network mirror and git-filter-repo; what is guarded
-# here is the pairing that can silently come undone.
+# rewrites messages and identities and never touches the tree, so a tracked log
+# would make --execute refuse to push a correct rewrite. Running the script
+# itself needs a network mirror and git-filter-repo; what is guarded here is the
+# pairing that can silently come undone.
+#
 # Counted on the invoking lines themselves, not on the file: the comment that
 # explains the pairing names the variable too, and matching that would make the
-# guard pass on the explanation alone.
+# guard pass on the explanation alone. Two, not "at least one": the before scan
+# feeds the counters the report prints, the after scan is what --execute reads.
 calls="$(grep -c 'post-commit.sh" --branches' "$ROOT/scripts/rewrite-history.sh")"
 guarded="$(grep 'post-commit.sh" --branches' "$ROOT/scripts/rewrite-history.sh" | grep -c 'PC_AGENT_FILES=false')"
-# Two, not "at least one": the before scan feeds the tainted/identity counters
-# the report prints, and the after scan is what --execute consults before force
-# pushing. Losing either is a silent regression that `-gt 0` would wave through.
 if [ "$calls" -eq 2 ] && [ "$guarded" -eq 2 ]; then
     PASS=$((PASS+1)); printf '  ok   %s\n' "every rewrite-history gate call disables the artefact check"
 else
     FAIL=$((FAIL+1)); printf '  FAIL %s (want 2 call(s) all guarded, got %s call(s), %s guarded)\n' "every rewrite-history gate call disables the artefact check" "$calls" "$guarded"
 fi
+
 
 echo "== usage errors (expect 2) =="
 d=$(mkrepo)
