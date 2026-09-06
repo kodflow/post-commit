@@ -441,6 +441,63 @@ echo '{}' > "$d/.devcontainer/images/.claude/logs/session.jsonl"
 git -C "$d" add -A; git -C "$d" commit -qm "chore: image payload with a stray log"
 check "a log nested in the devcontainer payload is still refused" 1 "$d"
 
+echo "== agent artefacts: one case per pattern, both ways =="
+# Exhaustive by construction rather than by discipline. Every pattern in
+# agent-paths.txt gets a representative path here, and the assertion names the
+# ones that went dark — so adding a pattern without a case, or breaking one
+# nobody happened to exercise, fails loudly instead of quietly.
+REFUSED=(
+    .claude/logs/a.jsonl .claude/plans/p.md .claude/todos/t.json
+    .claude/shell-snapshots/s.sh .claude/statsig/s.json .claude/paste-cache/p
+    .claude/session-env/e .claude/backups/b .claude/downloads/d
+    .claude/projects/p .claude/ide/i .claude/chrome/c
+    .claude/history.jsonl .claude/.credentials.json
+    .claude/policy-limits.json .claude/remote-settings.json
+    .claude/scheduled_tasks.lock .claude/settings.local.json
+    .claude/settings.json.bak-20260101
+    .aider.chat.history.md .aider.input.history .aider.llm.history
+    .aider.tags.cache.v3/cache.db
+    .specstory/history/2026-01-01.md
+    .continue/sessions/a.json .continue/index/a .continue/dev_data/a
+    .goose/sessions/a .goose/logs/a.log
+    .amazonq/cache/a .codeium/cache/a .qodo/cache/a .qodo/history/a
+    .cursor/mcp.local.json
+)
+d=$(mkrepo)
+for f in "${REFUSED[@]}"; do mkdir -p "$d/$(dirname "$f")"; echo x > "$d/$f"; done
+git -C "$d" add -A; git -C "$d" commit -qm "chore: one artefact per pattern"
+out="$(cd "$d" && env GITHUB_STEP_SUMMARY=/dev/null bash "$GATE" HEAD HEAD~1..HEAD 2>&1)"
+missed=""
+for f in "${REFUSED[@]}"; do
+    printf '%s' "$out" | grep -qF "file=$f" || missed="${missed:+$missed }$f"
+done
+if [ -z "$missed" ]; then
+    PASS=$((PASS+1)); printf '  ok   %s (%s paths)\n' "every pattern refuses its own artefact" "${#REFUSED[@]}"
+else
+    FAIL=$((FAIL+1)); printf '  FAIL %s — not matched: %s\n' "every pattern refuses its own artefact" "$missed"
+fi
+rm -rf "$d"
+
+# The other half of the contract, and the half that matters more: everything a
+# human authored for the agent stays. A pattern that grows a little too wide
+# lands here rather than on a repository's pull requests.
+ALLOWED=(
+    .claude/agents/reviewer.md .claude/agents/routing-table.jsonl
+    .claude/commands/ship.md .claude/skills/deploy.md .claude/docs/pattern.md
+    .claude/scripts/hook.sh .claude/templates/t.tpl .claude/workflows/w.yml
+    .claude/settings.json .claude/.claude.json .claude/features.json
+    .claude/sessions/.gitkeep .claude/db
+    .mcp.json .cursorrules .cursor/rules/style.mdc
+    .aider.conf.yml .aider.model.settings.yml .aider.model.metadata.json
+    .roomodes .clinerules .windsurfrules .codex/config.toml .gemini/settings.json
+    CLAUDE.md AGENTS.md GEMINI.md
+    .vscode/settings.json .idea/workspace.xml .devcontainer/devcontainer.json
+)
+d=$(mkrepo)
+for f in "${ALLOWED[@]}"; do mkdir -p "$d/$(dirname "$f")"; echo x > "$d/$f"; done
+git -C "$d" add -A; git -C "$d" commit -qm "chore: everything a human authored"
+check "no authored file is ever refused (${#ALLOWED[@]} paths)" 0 "$d"
+
 echo "== agent artefacts: scope, exemptions and reporting =="
 # The tree, not the range: the artefact arrives in an ancestor and the change
 # that added it is long merged. A range-scoped check would call this clean.
