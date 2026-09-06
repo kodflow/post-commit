@@ -56,6 +56,14 @@
 # of one in a repository is the same exhaust.
 (^|/)\.claude/(logs|plans|todos|shell-snapshots|statsig|paste-cache|session-env|backups|downloads|projects|ide|chrome)/
 (^|/)\.claude/history\.jsonl$
+# The OAuth token store. Nothing in a repository has less business being there,
+# and the secrets check would not save you: it reads only the lines a push
+# ADDS, and a `sk-ant-oat01-…` token carries hyphens where its `sk-[a-zA-Z0-9]`
+# pattern expects none. Tracked once, this stays tracked and stays missed.
+(^|/)\.claude/\.credentials\.json$
+# Account and machine state the server pushes down — not configuration anyone
+# wrote, and meaningless in another checkout.
+(^|/)\.claude/(policy-limits|remote-settings)\.json$
 (^|/)\.claude/[^/]*\.lock$
 # A personal machine's overrides, which Claude Code itself keeps out of git.
 # Committing one imposes one developer's permissions on everybody.

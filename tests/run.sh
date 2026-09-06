@@ -400,6 +400,18 @@ echo '{}' > "$d/.claude/history.jsonl"
 git -C "$d" add -A; git -C "$d" commit -qm "chore: a lock and a history"
 check "a lock file and history.jsonl are refused" 1 "$d"
 
+# The worst thing a `.claude/` can carry, and the one the secrets check cannot
+# save you from: it reads only the lines a push ADDS, so a credentials file
+# committed once is never looked at again.
+d=$(mkrepo); mkdir -p "$d/.claude"; echo '{"t":"x"}' > "$d/.claude/.credentials.json"
+git -C "$d" add -A; git -C "$d" commit -qm "chore: oauth token store"
+check "a committed credentials file is refused" 1 "$d"
+
+d=$(mkrepo); mkdir -p "$d/.claude"
+echo '{}' > "$d/.claude/policy-limits.json"; echo '{}' > "$d/.claude/remote-settings.json"
+git -C "$d" add -A; git -C "$d" commit -qm "chore: machine state"
+check "server-pushed machine state is refused" 1 "$d"
+
 d=$(mkrepo); echo 'chat' > "$d/.aider.chat.history.md"
 git -C "$d" add -A; git -C "$d" commit -qm "chore: aider transcript"
 check "aider's transcript is refused while its conf is not" 1 "$d"
