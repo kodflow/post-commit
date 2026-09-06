@@ -97,11 +97,14 @@ committed once is never looked at again — and a `sk-ant-oat01-…` token carri
 hyphens where the `sk-[a-zA-Z0-9]` pattern expects none. Here it stays red for
 as long as the file is tracked.
 
-**Not matched, by decision rather than by omission**: everything above, plus
-editor configuration (`.vscode/`, `.idea/`, `.zed/`), `.devcontainer/`, and
-markdown instructions (`CLAUDE.md`, `AGENTS.md`, `GEMINI.md`). Nothing is
-matched *because* it sits under an agent directory — the directory is
-legitimate; only the listed children are not. A log dropped inside
+**Not matched, by decision rather than by omission**: an agent's configuration
+— `.claude/agents/`, `commands/`, `skills/`, `docs/`, `scripts/`,
+`settings.json`, `.mcp.json`, `.cursorrules`, `.cursor/rules/`, `.clinerules`,
+`.aider.conf.yml` — plus the two measured cases above, editor configuration
+(`.vscode/`, `.idea/`, `.zed/`), `.devcontainer/`, and markdown instructions
+(`CLAUDE.md`, `AGENTS.md`, `GEMINI.md`). Nothing is matched *because* it sits
+under an agent directory — the directory is legitimate; only the listed
+children are not. A log dropped inside
 `.devcontainer/images/.claude/` is still a log, though: no parent grants
 immunity, or "put it under `.devcontainer/`" becomes the way around the rule.
 
