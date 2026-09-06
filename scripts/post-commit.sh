@@ -454,9 +454,9 @@ esc_prop() {
     if [ "$AGENT_N" -gt 0 ]; then
         echo "### ❌ Agent artefacts tracked — $AGENT_N file(s)"
         echo ""
-        echo "An AI agent's tooling configuration does not belong in a repository."
-        echo "This is the same rejection policy the attribution rules apply to commit"
-        echo "messages, applied to what a change leaves on disk."
+        echo "These are files an agent WROTE — a session log, a transcript, a plan,"
+        echo "a lock, a cache, a personal override. Nobody reviews them, they conflict"
+        echo "on every merge, and they carry whatever the session happened to touch."
         echo ""
         shown=0
         for root in ${AGENT_ROOT_ORDER[@]+"${AGENT_ROOT_ORDER[@]}"}; do
@@ -478,11 +478,11 @@ esc_prop() {
         echo "> **No history rewrite is needed**: this check reads the tree at the head,"
         echo "> not the ancestry, so one commit clears it."
         echo ">"
-        echo "> Editor configuration (\`.vscode/\`, \`.idea/\`), \`.devcontainer/\` itself and"
-        echo "> markdown instructions (\`CLAUDE.md\`, \`AGENTS.md\`) are never matched — but an"
-        echo "> agent directory nested inside one of them still is."
-        echo "> A repository that exists to distribute this configuration exempts the"
-        echo "> exact paths it ships with the \`agent_files_allow\` input."
+        echo "> The agent's **configuration is source and is never matched**:"
+        echo "> \`.claude/agents/\`, \`commands/\`, \`skills/\`, \`settings.json\`, \`.mcp.json\`,"
+        echo "> \`.cursorrules\` — and editor config and \`CLAUDE.md\` alongside them."
+        echo "> Only the listed runtime directories and filenames are refused, wherever"
+        echo "> they sit. \`agent_files_allow\` exempts a path if one is genuinely wanted."
         echo ""
     fi
 } > "$REPORT_BODY"

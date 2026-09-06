@@ -5,8 +5,8 @@
 name: post-commit
 description: >-
   Mandatory merge gate: every commit authored by an allowed account, no AI
-  attribution anywhere in history, no agent configuration tracked in the tree,
-  conventional commit subjects, no credentials added. Logic lives in
+  attribution anywhere in history, no agent session exhaust tracked in the
+  tree, conventional commit subjects, no credentials added. Logic lives in
   kodflow/post-commit —
   callers pin @main so a fix there is live everywhere on the next run.
 branding:
@@ -38,19 +38,20 @@ inputs:
     default: 'true'
   agent_files:
     description: >-
-      Refuse an AI agent's tooling configuration tracked in the repository —
-      .claude/, .cursor/, .windsurf/, .aider.*, .codex/, … (full list:
-      scripts/agent-paths.txt). The tree at the head is what is read, not the
-      range, so the check stays red until the files are gone; one `git rm
-      --cached` clears it, no history rewrite. Editor configuration (.vscode/,
-      .idea/), .devcontainer/ and markdown instructions (CLAUDE.md, AGENTS.md)
-      are never matched.
+      Refuse what an AI agent WRITES when it is tracked in the repository —
+      .claude/logs/, .claude/plans/, settings.local.json, .aider.chat.history.md,
+      .specstory/history/, session and cache directories (full list:
+      scripts/agent-paths.txt). An agent's CONFIGURATION is source and is never
+      matched: .claude/agents/, commands/, skills/, settings.json, .mcp.json,
+      .cursorrules and the rest. The tree at the head is what is read, not the
+      range, so the check stays red until the exhaust is gone; one `git rm
+      --cached` clears it, no history rewrite.
     default: 'true'
   agent_files_allow:
     description: >-
-      Space/comma separated paths exempt from the agent-artefact check, for a
-      repository whose purpose is to distribute that configuration. A bare
-      entry exempts the whole subtree: `.claude` covers `.claude/settings.json`.
+      Space/comma separated paths exempt from the agent-artefact check. A bare
+      entry exempts the whole subtree: `.claude/logs` covers everything under
+      it. Rarely needed now that configuration is allowed by default.
     default: ''
   token:
     description: Token used to check out the calling repository.
