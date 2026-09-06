@@ -416,6 +416,14 @@ d=$(mkrepo); echo 'chat' > "$d/.aider.chat.history.md"
 git -C "$d" add -A; git -C "$d" commit -qm "chore: aider transcript"
 check "aider's transcript is refused while its conf is not" 1 "$d"
 
+# aider names the cache directory after the cache FORMAT VERSION
+# (`TAGS_CACHE_DIR = f".aider.tags.cache.v{CACHE_VERSION}"`), so a bare
+# `.aider.tags.cache` never exists. Anchoring that pattern with `$` — which
+# reads like an obvious tightening — would match nothing and retire the rule.
+d=$(mkrepo); mkdir -p "$d/.aider.tags.cache.v3"; echo 'x' > "$d/.aider.tags.cache.v3/cache.db"
+git -C "$d" add -A; git -C "$d" commit -qm "chore: aider tag cache"
+check "the version-suffixed tag cache is refused" 1 "$d"
+
 d=$(mkrepo); mkdir -p "$d/.specstory/history"; echo 'chat' > "$d/.specstory/history/2026-01-01.md"
 git -C "$d" add -A; git -C "$d" commit -qm "chore: recorded chat"
 check "a recorded chat transcript is refused" 1 "$d"

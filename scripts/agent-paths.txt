@@ -71,11 +71,17 @@
 # Timestamped backups the tool leaves beside a file it rewrote.
 (^|/)\.claude/[^/]*\.bak([-.][^/]*)?$
 # --- aider -------------------------------------------------------------------
-# The transcripts and the tag cache. `.aider.conf.yml` is configuration and is
-# deliberately absent from this list.
+# The three transcripts, whose names are aider's documented defaults, and the
+# tag cache. `.aider.conf.yml`, `.aider.model.settings.yml` and
+# `.aider.model.metadata.json` are configuration and are deliberately absent.
 (^|/)\.aider\.chat\.history\.md$
 (^|/)\.aider\.input\.history$
 (^|/)\.aider\.llm\.history$
+# NO `$` HERE, ON PURPOSE. The cache directory carries the cache format
+# version — aider/repomap.py: `TAGS_CACHE_DIR = f".aider.tags.cache.v{CACHE_VERSION}"`,
+# currently v3 and v4 — so a bare `.aider.tags.cache` never exists on disk.
+# Anchoring this would match nothing at all and quietly retire the rule. A
+# test pins `.aider.tags.cache.v3/` for exactly that reason.
 (^|/)\.aider\.tags\.cache
 # --- SpecStory ---------------------------------------------------------------
 # Recording the chat into the repository is the product's whole purpose, which
