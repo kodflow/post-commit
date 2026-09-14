@@ -349,6 +349,54 @@ d=$(mkrepo); mkdir -p "$d/tests"; echo 'AKIAIOSFODNN7EXAMPLE' > "$d/tests/fixtur
 git -C "$d" add -A; git -C "$d" commit -qm "chore: config"
 check "a real path still fails even with a fixture alongside" 1 "$d"
 
+# A substitution is not a credential. These are the shapes a config file uses
+# to say WHERE the secret comes from — the practice this gate exists to
+# encourage. Failing them teaches people to hide the reference, not the secret.
+d=$(mkrepo); printf '%s\n' 'password: "{{ vault_admin_password }}"' > "$d/f.yml"
+git -C "$d" add -A; git -C "$d" commit -qm "chore: config"
+check "a jinja substitution is not a credential" 0 "$d"
+
+d=$(mkrepo); printf '%s\n' '    RESTIC_PASSWORD: "{{ backup_restic_password }}"' > "$d/f.yml"
+git -C "$d" add -A; git -C "$d" commit -qm "chore: config"
+check "a suffixed key with a jinja substitution is not a credential" 0 "$d"
+
+d=$(mkrepo); printf '%s\n' 'api_key = "${API_KEY}"' 'secret_key = "$(vault read -field=k s/x)"' > "$d/f.sh"
+git -C "$d" add -A; git -C "$d" commit -qm "chore: config"
+check "shell expansions are not credentials" 0 "$d"
+
+d=$(mkrepo); printf '%s\n' 'password: "<%= ENV[:db_password] %>"' > "$d/f.erb"
+git -C "$d" add -A; git -C "$d" commit -qm "chore: config"
+check "an erb substitution is not a credential" 0 "$d"
+
+# The reason the filter is a second pass and not a looser SECRET_RE: a value
+# starting with `$` is not automatically a substitution. These are crypt
+# hashes, and they are credentials.
+d=$(mkrepo); printf '%s\n' 'password = "$6$rounds=656000$saltsalt$hashhashhash"' > "$d/f.txt"
+git -C "$d" add -A; git -C "$d" commit -qm "chore: config"
+check "a crypt hash is still a credential" 1 "$d"
+
+d=$(mkrepo); printf '%s\n' 'password = "$2y$10$abcdefghijklmnopqrstuv"' > "$d/f.txt"
+git -C "$d" add -A; git -C "$d" commit -qm "chore: config"
+check "a bcrypt hash is still a credential" 1 "$d"
+
+d=$(mkrepo); printf '%s\n' 'password: "{{ from_vault }}"' 'password: "hunter2000"' > "$d/f.yml"
+git -C "$d" add -A; git -C "$d" commit -qm "chore: config"
+check "a real password alongside a substitution still fails" 1 "$d"
+
+# A substitution carrying a literal fallback is not a reference: it commits the
+# very secret the reference was supposed to keep out.
+d=$(mkrepo); printf '%s\n' 'api_key = "${API_KEY:-hunter2000}"' > "$d/f.sh"
+git -C "$d" add -A; git -C "$d" commit -qm "chore: config"
+check "a shell fallback secret is still a credential" 1 "$d"
+
+d=$(mkrepo); printf '%s\n' 'password = "${DB_PASSWORD:=hunter2000}"' > "$d/f.sh"
+git -C "$d" add -A; git -C "$d" commit -qm "chore: config"
+check "a shell assign-default secret is still a credential" 1 "$d"
+
+d=$(mkrepo); printf '%s\n' "password: \"{{ db_password | default('hunter2000') }}\"" > "$d/f.yml"
+git -C "$d" add -A; git -C "$d" commit -qm "chore: config"
+check "a jinja default secret is still a credential" 1 "$d"
+
 echo "== agent artefacts: configuration is source, exhaust is not =="
 # The rule refuses what an agent WRITES, not what a human wrote for it. These
 # first cases are the ones a repository is entitled to carry.
