@@ -252,7 +252,18 @@ fi
 # failed by the key it removes. `\+` is a GNU-BRE-only quantifier that ugrep
 # rejects outright, so both filters use ERE where `\+` is an unambiguous
 # literal plus.
-SECRET_RE='password[[:space:]]*[=:][[:space:]]*["'"'"'][^"'"'"']{4,}|api[_-]?key[[:space:]]*[=:][[:space:]]*["'"'"'][^"'"'"']{8,}|secret[_-]?key[[:space:]]*[=:][[:space:]]*["'"'"'][^"'"'"']{8,}|BEGIN (RSA|OPENSSH|DSA|EC|PGP) PRIVATE KEY|ghp_[a-zA-Z0-9]{36}|gho_[a-zA-Z0-9]{36}|github_pat_[a-zA-Z0-9_]{22,}|sk-[a-zA-Z0-9]{48}|AKIA[0-9A-Z]{16}|xox[baprs]-[a-zA-Z0-9-]{10,}|AIza[0-9A-Za-z_-]{35}'
+# Split in two halves, because only one of them can ever be a reference.
+#
+# The KEYWORD half is `password = "…"` and friends: a name and a value, where
+# the value may legitimately be a substitution. That half is subject to the
+# exemption below.
+#
+# The TOKEN half is a credential's own printed form — an AWS key id, a GitHub
+# PAT, a PEM header. No substitution produces one of those, so that half is
+# NEVER exempted, and it is scanned separately. Keeping them together is what
+# let a line carrying both a lookup and a real token be dropped wholesale.
+SECRET_KEYWORD_RE='password[[:space:]]*[=:][[:space:]]*["'"'"'][^"'"'"']{4,}|api[_-]?key[[:space:]]*[=:][[:space:]]*["'"'"'][^"'"'"']{8,}|secret[_-]?key[[:space:]]*[=:][[:space:]]*["'"'"'][^"'"'"']{8,}'
+SECRET_TOKEN_RE='BEGIN (RSA|OPENSSH|DSA|EC|PGP) PRIVATE KEY|ghp_[a-zA-Z0-9]{36}|gho_[a-zA-Z0-9]{36}|github_pat_[a-zA-Z0-9_]{22,}|sk-[a-zA-Z0-9]{48}|AKIA[0-9A-Z]{16}|xox[baprs]-[a-zA-Z0-9-]{10,}|AIza[0-9A-Za-z_-]{35}'
 # A value that is a SUBSTITUTION is not a credential. A jinja `{{ … }}`, a
 # shell `${…}`, an ERB `<%= … %>` name WHERE the secret comes from — they are
 # the pattern this gate exists to encourage, and failing them teaches people to
@@ -270,15 +281,28 @@ SECRET_RE='password[[:space:]]*[=:][[:space:]]*["'"'"'][^"'"'"']{4,}|api[_-]?key
 # carrying both a placeholder assignment and a real token would be dropped with
 # it. A line of that shape is not a thing anyone writes; GitGuardian, which
 # runs on these repos, has no such blind spot either.
-# The exemption is written as what a BARE REFERENCE looks like, not as "starts
-# with a substitution". That distinction is the whole safety of it: a value that
-# merely begins as a substitution can still carry a literal fallback —
-# `${API_KEY:-hunter2000}`, `{{ key | default('hunter2000') }}` — and those
-# commit the very secret the reference was supposed to keep out. A bare
-# reference has no room for one: the name is followed by its closing delimiter,
-# and a quote anywhere inside means it is not bare. Both forms above therefore
-# stay refused, as their tests pin.
-SECRET_PLACEHOLDER_RE='(password|api[_-]?key|secret[_-]?key)[[:space:]]*[=:][[:space:]]*["'"'"'][[:space:]]*(\{\{[^"'"'"'{}]*\}\}|\$\{[a-z_][a-z0-9_]*\}|\$\([^"'"'"'()]*\)|<%=[^"'"'"'<>]*%>)[[:space:]]*["'"'"']'
+# The exempted value is a substitution that is the WHOLE value — opener, body,
+# closer, then the closing quote. Anchoring the end matters: without it,
+# `"${PASSWORD}hunter2000"` and `"{{ key }}hunter2000"` would be exempted on
+# their first three characters and carry a literal out past the gate.
+#
+# Quotes INSIDE the body are allowed, deliberately. A narrower rule was tried
+# first — "a bare reference, no quote inside" — and it refused
+# `{{ lookup('pipe', …) }}`, which is how Ansible fetches a secret from an
+# external store at run time: the single best thing a config file can do with a
+# password, and the exact opposite of a leak. Quotes are not the signal.
+SECRET_PLACEHOLDER_RE='(password|api[_-]?key|secret[_-]?key)[[:space:]]*[=:][[:space:]]*["'"'"'][[:space:]]*(\{\{[^{}]*\}\}|\{%[^{}]*%\}|\$\{[a-z_][a-z0-9_]*\}|\$\([^()]*\)|<%=[^<>]*%>|%\{[^{}]*\})[[:space:]]*["'"'"']'
+# The dangerous subset: a fallback that supplies a LITERAL.
+# `${API_KEY:-hunter2000}` and `{{ key | default('hunter2000') }}` commit the
+# very secret the reference was supposed to keep out, so they are added back as
+# hits below.
+#
+# What makes it a literal is the argument, not the `default` itself. A default
+# is how you write an OPTIONAL reference — `default(omit)` is the ordinary
+# Ansible idiom for "leave this out", and `default(vault_password)` names
+# another variable. Neither commits anything. So the argument must open with a
+# quote or a digit, and a shell fallback must not be empty or another `$`.
+SECRET_FALLBACK_RE='(password|api[_-]?key|secret[_-]?key)[[:space:]]*[=:][[:space:]]*["'"'"'][[:space:]]*(\{\{[^{}]*\|[[:space:]]*d(efault)?[[:space:]]*\([[:space:]]*["'"'"'0-9]|\$\{[a-z_][a-z0-9_]*:?[-=?+][^}$])'
 # Test and fixture paths are excluded: their legitimate content includes
 # fake credentials that exercise scanners (this repo's own tests/run.sh
 # tripped the gate on its first dogfood run). Narrow by design — a real
@@ -290,14 +314,35 @@ SECRET_EXCLUDE=(':(exclude,glob)tests/**' ':(exclude,glob)**/tests/**'
                 ':(exclude,glob)fixtures/**' ':(exclude,glob)**/fixtures/**'
                 ':(exclude,glob)__tests__/**' ':(exclude,glob)**/__tests__/**'
                 ':(exclude,glob)**/*.bats' ':(exclude,glob)**/*_test.*' ':(exclude,glob)**/*.test.*')
+# The added lines of the range, read three times below. Three passes rather
+# than one because the rule is a union whose parts need opposite senses, which
+# a single grep cannot express:
+#
+#   1. a credential's own printed form  — never exempt
+#   2. a keyword assignment that is NOT a substitution
+#   3. a substitution whose fallback supplies a literal
+#
+# Pass 1 is separate for a reason: the exemption drops a whole LINE, so folding
+# tokens in with keywords meant a line carrying both a lookup and a real PAT was
+# discarded with the lookup. Scanned on its own, the token is always found.
+#
+# The passes overlap — a `${VAR:-secret}` line is in 2 and 3 — so the union is
+# de-duplicated. awk rather than `sort -u`: it keeps the diff's own order, which
+# is the order the report reads best in.
+secret_added_lines() {
+    git diff --unified=0 "$RANGE" -- . "${SECRET_EXCLUDE[@]}" 2>/dev/null \
+      | grep -E '^\+' | grep -Ev '^\+\+\+'
+}
 if [ "$SECRETS" = "true" ] && [ -n "$RANGE" ]; then
     while IFS= read -r hit; do
         [ -z "$hit" ] && continue
         SEC_N=$((SEC_N + 1))
         printf '%s\n' "$hit" >> "$SEC_FILE"
-    done < <(git diff --unified=0 "$RANGE" -- . "${SECRET_EXCLUDE[@]}" 2>/dev/null \
-             | grep -E '^\+' | grep -Ev '^\+\+\+' | grep -iE -- "$SECRET_RE" \
-             | grep -ivE -- "$SECRET_PLACEHOLDER_RE" | head -40)
+    done < <( { secret_added_lines | grep -iE -- "$SECRET_TOKEN_RE"; \
+                secret_added_lines | grep -iE -- "$SECRET_KEYWORD_RE" \
+                                   | grep -ivE -- "$SECRET_PLACEHOLDER_RE"; \
+                secret_added_lines | grep -iE -- "$SECRET_FALLBACK_RE"; } \
+              | awk '!seen[$0]++' | head -40)
 fi
 
 # --- 4. Agent artefacts (the tree at the head) -------------------------------

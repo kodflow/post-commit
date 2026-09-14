@@ -368,6 +368,41 @@ d=$(mkrepo); printf '%s\n' 'password: "<%= ENV[:db_password] %>"' > "$d/f.erb"
 git -C "$d" add -A; git -C "$d" commit -qm "chore: config"
 check "an erb substitution is not a credential" 0 "$d"
 
+# The regression that motivated widening the exemption: quotes INSIDE a
+# substitution are ordinary. `lookup('pipe', …)` is how Ansible fetches a secret
+# from an external store at run time — the best thing a config file can do with
+# a password, and the exact opposite of a leak.
+d=$(mkrepo); printf '%s\n' "backup_restic_password: \"{{ lookup('pipe', secret_cmd ~ ' backup-restic') }}\"" > "$d/f.yml"
+git -C "$d" add -A; git -C "$d" commit -qm "chore: config"
+check "a jinja lookup with quoted arguments is not a credential" 0 "$d"
+
+d=$(mkrepo); printf '%s\n' "password: \"<%= ENV['DB_PASSWORD'] %>\"" > "$d/f.erb"
+git -C "$d" add -A; git -C "$d" commit -qm "chore: config"
+check "an erb substitution with a quoted key is not a credential" 0 "$d"
+
+# A default is how an OPTIONAL reference is written. `default(omit)` is the
+# ordinary Ansible idiom for "leave this out"; `default(other_var)` names
+# another variable. Neither commits anything.
+d=$(mkrepo); printf '%s\n' 'password: "{{ db_password | default(omit) }}"' 'api_key: "{{ k | default(vault_api_key) }}"' > "$d/f.yml"
+git -C "$d" add -A; git -C "$d" commit -qm "chore: config"
+check "a default naming a variable is not a credential" 0 "$d"
+
+# The substitution must be the WHOLE value. Exempting on the opener alone would
+# let a literal ride out past the closing brace.
+d=$(mkrepo); printf '%s\n' 'password = "${PASSWORD}hunter2000"' > "$d/f.sh"
+git -C "$d" add -A; git -C "$d" commit -qm "chore: config"
+check "a literal trailing a shell reference is still a credential" 1 "$d"
+
+d=$(mkrepo); printf '%s\n' 'password: "{{ key }}hunter2000"' > "$d/f.yml"
+git -C "$d" add -A; git -C "$d" commit -qm "chore: config"
+check "a literal trailing a jinja reference is still a credential" 1 "$d"
+
+# Tokens are scanned on their own pass precisely so the exemption cannot carry
+# one away with the line it sits on.
+d=$(mkrepo); printf '%s\n' "password: \"{{ lookup('env', 'P') }}\"  # ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" > "$d/f.yml"
+git -C "$d" add -A; git -C "$d" commit -qm "chore: config"
+check "a token beside a lookup is still found" 1 "$d"
+
 # The reason the filter is a second pass and not a looser SECRET_RE: a value
 # starting with `$` is not automatically a substitution. These are crypt
 # hashes, and they are credentials.
