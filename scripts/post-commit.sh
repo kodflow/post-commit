@@ -253,6 +253,32 @@ fi
 # rejects outright, so both filters use ERE where `\+` is an unambiguous
 # literal plus.
 SECRET_RE='password[[:space:]]*[=:][[:space:]]*["'"'"'][^"'"'"']{4,}|api[_-]?key[[:space:]]*[=:][[:space:]]*["'"'"'][^"'"'"']{8,}|secret[_-]?key[[:space:]]*[=:][[:space:]]*["'"'"'][^"'"'"']{8,}|BEGIN (RSA|OPENSSH|DSA|EC|PGP) PRIVATE KEY|ghp_[a-zA-Z0-9]{36}|gho_[a-zA-Z0-9]{36}|github_pat_[a-zA-Z0-9_]{22,}|sk-[a-zA-Z0-9]{48}|AKIA[0-9A-Z]{16}|xox[baprs]-[a-zA-Z0-9-]{10,}|AIza[0-9A-Za-z_-]{35}'
+# A value that is a SUBSTITUTION is not a credential. A jinja `{{ … }}`, a
+# shell `${…}`, an ERB `<%= … %>` name WHERE the secret comes from — they are
+# the pattern this gate exists to encourage, and failing them teaches people to
+# hide the reference rather than the secret.
+#
+# Filtered in a second pass rather than by loosening SECRET_RE. Loosening it
+# would mean "the value must not start with `{`, `$`, `<`" — which also stops
+# matching crypt and bcrypt hashes, whose values start with a dollar and which
+# very much are credentials.
+#
+# Only the three keyword shapes need this. The token shapes (AKIA…, ghp_…,
+# BEGIN … PRIVATE KEY) cannot be produced by a substitution.
+#
+# Narrow by design, and worth stating: this drops the whole LINE, so a line
+# carrying both a placeholder assignment and a real token would be dropped with
+# it. A line of that shape is not a thing anyone writes; GitGuardian, which
+# runs on these repos, has no such blind spot either.
+# The exemption is written as what a BARE REFERENCE looks like, not as "starts
+# with a substitution". That distinction is the whole safety of it: a value that
+# merely begins as a substitution can still carry a literal fallback —
+# `${API_KEY:-hunter2000}`, `{{ key | default('hunter2000') }}` — and those
+# commit the very secret the reference was supposed to keep out. A bare
+# reference has no room for one: the name is followed by its closing delimiter,
+# and a quote anywhere inside means it is not bare. Both forms above therefore
+# stay refused, as their tests pin.
+SECRET_PLACEHOLDER_RE='(password|api[_-]?key|secret[_-]?key)[[:space:]]*[=:][[:space:]]*["'"'"'][[:space:]]*(\{\{[^"'"'"'{}]*\}\}|\$\{[a-z_][a-z0-9_]*\}|\$\([^"'"'"'()]*\)|<%=[^"'"'"'<>]*%>)[[:space:]]*["'"'"']'
 # Test and fixture paths are excluded: their legitimate content includes
 # fake credentials that exercise scanners (this repo's own tests/run.sh
 # tripped the gate on its first dogfood run). Narrow by design — a real
@@ -270,7 +296,8 @@ if [ "$SECRETS" = "true" ] && [ -n "$RANGE" ]; then
         SEC_N=$((SEC_N + 1))
         printf '%s\n' "$hit" >> "$SEC_FILE"
     done < <(git diff --unified=0 "$RANGE" -- . "${SECRET_EXCLUDE[@]}" 2>/dev/null \
-             | grep -E '^\+' | grep -Ev '^\+\+\+' | grep -iE -- "$SECRET_RE" | head -40)
+             | grep -E '^\+' | grep -Ev '^\+\+\+' | grep -iE -- "$SECRET_RE" \
+             | grep -ivE -- "$SECRET_PLACEHOLDER_RE" | head -40)
 fi
 
 # --- 4. Agent artefacts (the tree at the head) -------------------------------
