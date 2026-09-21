@@ -106,16 +106,32 @@ STUB_B64="$(base64 -w0 < "$STUB_FILE")"
 STUB_BLOB="$(git hash-object "$STUB_FILE")"
 WORKDIR="$(mktemp -d)"
 trap 'rm -rf "$WORKDIR"' EXIT
+# Real newlines, not `\n`. `gh pr create --body` takes this string literally, so
+# the escapes that used to be here reached the pull request as the two
+# characters backslash and n — every sync body on the fleet rendered as one
+# run-on paragraph with `\n` printed in the middle of it.
 SYNC_BODY='The gate workflow in this repository has drifted from the central stub in
 [kodflow/post-commit](https://github.com/kodflow/post-commit/blob/main/stub/post-commit.yml).
-\nThe rules themselves live in the action and are pinned to `@main`, so they were
+
+The rules themselves live in the action and are pinned to `@main`, so they were
 already current here. What was not is everything the stub itself carries — the
-inputs it passes, and the jobs that react to a verdict.\n\nThis replaces the file
-with the central copy verbatim. Nothing in it is repository-specific.'
+inputs it passes, and the jobs that react to a verdict.
+
+This replaces the file with the central copy verbatim. Nothing in it is
+repository-specific.'
 # Appended for a repository carrying a runner override: the file this opens is
 # rendered, not copied, so the label survives — but any commentary added
 # locally does not, because the sync writes the central copy.
-OVERRIDE_NOTE='\n\n### This repository carries a runner override\n\nThe `runs-on:` of the gate job is not the stub value. That is deliberate and\ncentral — it lives in `RUNNER_OVERRIDES` in\n[scripts/enforce.sh](https://github.com/kodflow/post-commit/blob/main/scripts/enforce.sh),\nwhich is also where the reason is written down — and this pull request keeps\nit. What it does not keep is any comment added to the file inside this\nrepository: the sync writes the central copy, annotated only by the override.'
+OVERRIDE_NOTE='
+
+### This repository carries a runner override
+
+The `runs-on:` of the gate job is not the stub value. That is deliberate and
+central — it lives in `RUNNER_OVERRIDES` in
+[scripts/enforce.sh](https://github.com/kodflow/post-commit/blob/main/scripts/enforce.sh),
+which is also where the reason is written down — and this pull request keeps it.
+What it does not keep is any comment added to the file inside this repository:
+the sync writes the central copy, annotated only by the override.'
 
 ruleset_payload() {
     jq -n --arg name "$RULESET_NAME" --argjson app "$GITHUB_ACTIONS_APP_ID" '{
