@@ -714,6 +714,16 @@ else
 fi
 
 
+# The fleet enforcer's own comparison. It gained a per-repository runner
+# override, which is the kind of change that ends with a check that can no
+# longer fail — so its cases live in the script, network-free, and run here.
+echo "== enforce: runner override =="
+if out="$(bash "$ROOT/scripts/enforce.sh" --selftest 2>&1)"; then
+    PASS=$((PASS+1)); printf '  ok   enforce.sh --selftest\n'
+else
+    FAIL=$((FAIL+1)); printf '  FAIL enforce.sh --selftest\n%s\n' "$(printf '%s' "$out" | sed 's/^/       /')"
+fi
+
 echo "== usage errors (expect 2) =="
 d=$(mkrepo)
 out="$(cd "$d" && bash "$GATE" 2>&1)"; rc=$?

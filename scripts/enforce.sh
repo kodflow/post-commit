@@ -29,10 +29,13 @@
 # reported as UNAVAILABLE — GitHub cannot enforce anything there.
 #
 # usage: enforce.sh [--apply] [--audit] [--report FILE] (--all | owner/repo ...)
+#        enforce.sh --selftest
 #   dry-run unless --apply. --audit only reads: it answers the three questions
 #   that decide whether the gate is real on a repository — is the workflow
 #   there, can the required status actually be enforced, and can anyone walk
 #   past it. Needs `gh` authenticated as an admin of the targets.
+#   --selftest touches no network: it pins the drift comparison in both
+#   directions (see RUNNER_OVERRIDES) and is what CI runs.
 # ============================================================================
 set -uo pipefail
 
@@ -45,12 +48,44 @@ RULESET_NAME="post-commit"
 # This repository gates itself through ci.yml, so it has no stub by design.
 SELF_REPO="kodflow/post-commit"
 GITHUB_ACTIONS_APP_ID=15368
-APPLY=false; AUDIT=false; REPORT=""; TARGETS=()
+# The runner the stub asks for. Nothing substitutes ON this value — an
+# override replaces whatever label the gate job carries — but the selftest
+# checks against it that `block-merge` was left alone, so it is written down
+# once rather than spelled out at each use.
+STUB_RUNNER="ubuntu-latest"
+
+# Repositories whose gate job legitimately runs somewhere other than the stub's
+# runner, and the label it runs on instead. `owner/repo=label`, one per line.
+#
+# supervizio/agent and supervizio/libprobe are PRIVATE, so every run of this
+# gate — every pull-request commit, every push to the trunk, every manual check
+# — bills GitHub-hosted minutes, rounded UP to a whole minute per job, for a
+# composite action that is actions/checkout plus bash. At the observed merge
+# rate that is on the order of 560 billable minutes a month across the two, and
+# it is what exhausted libprobe's allowance four times. The same run on the
+# self-hosted ARC pool costs nothing and lands some 15-25s slower — measured at
+# 26s on agent and 36s on libprobe against 9-18s hosted.
+#
+# supervizio/runner-template is deliberately NOT here and must not be added: it
+# is PUBLIC, its hosted minutes are free, and pointing a public repository's
+# pull requests at a self-hosted runner would let an untrusted fork run code on
+# the fleet. That asymmetry is the whole reason this is per-repository and not
+# an edit to the stub — a stub change would be actively wrong for that repo.
+#
+# An override relaxes exactly one line of exactly one job. Everything else in
+# the deployed file is still required to match the stub, so a repository listed
+# here is NOT exempt from the next stub change; see stub_covered_by.
+RUNNER_OVERRIDES=(
+    "supervizio/agent=supervizio-runner"
+    "supervizio/libprobe=supervizio-runner"
+)
+APPLY=false; AUDIT=false; SELFTEST=false; REPORT=""; TARGETS=()
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --apply) APPLY=true ;;
         --audit) AUDIT=true ;;
+        --selftest) SELFTEST=true ;;
         --report) REPORT="$2"; shift ;;
         --all)
             OWNER="$(gh api user --jq .login)"
@@ -65,16 +100,22 @@ while [ $# -gt 0 ]; do
     esac
     shift
 done
-[ "${#TARGETS[@]}" -gt 0 ] || { echo "usage: enforce.sh [--apply] [--audit] [--report FILE] (--all | owner/repo ...)" >&2; exit 2; }
+$SELFTEST || [ "${#TARGETS[@]}" -gt 0 ] || { echo "usage: enforce.sh [--apply] [--audit] [--report FILE] (--all | owner/repo ...)" >&2; exit 2; }
 [ -r "$STUB_FILE" ] || { echo "stub not found: $STUB_FILE" >&2; exit 2; }
 STUB_B64="$(base64 -w0 < "$STUB_FILE")"
 STUB_BLOB="$(git hash-object "$STUB_FILE")"
+WORKDIR="$(mktemp -d)"
+trap 'rm -rf "$WORKDIR"' EXIT
 SYNC_BODY='The gate workflow in this repository has drifted from the central stub in
 [kodflow/post-commit](https://github.com/kodflow/post-commit/blob/main/stub/post-commit.yml).
 \nThe rules themselves live in the action and are pinned to `@main`, so they were
 already current here. What was not is everything the stub itself carries — the
 inputs it passes, and the jobs that react to a verdict.\n\nThis replaces the file
 with the central copy verbatim. Nothing in it is repository-specific.'
+# Appended for a repository carrying a runner override: the file this opens is
+# rendered, not copied, so the label survives — but any commentary added
+# locally does not, because the sync writes the central copy.
+OVERRIDE_NOTE='\n\n### This repository carries a runner override\n\nThe `runs-on:` of the gate job is not the stub value. That is deliberate and\ncentral — it lives in `RUNNER_OVERRIDES` in\n[scripts/enforce.sh](https://github.com/kodflow/post-commit/blob/main/scripts/enforce.sh),\nwhich is also where the reason is written down — and this pull request keeps\nit. What it does not keep is any comment added to the file inside this\nrepository: the sync writes the central copy, annotated only by the override.'
 
 ruleset_payload() {
     jq -n --arg name "$RULESET_NAME" --argjson app "$GITHUB_ACTIONS_APP_ID" '{
@@ -91,6 +132,70 @@ ruleset_payload() {
         ]}'
 }
 
+runner_override() {   # runner_override <owner/repo> -> the label, or nothing
+    local repo="$1" entry
+    # `set -u` and an empty array are not friends on every bash this runs on,
+    # and an empty list is a realistic end state — the day both repositories
+    # come back to the stub, this file should need one deletion, not two.
+    [ "${#RUNNER_OVERRIDES[@]}" -gt 0 ] || return 1
+    for entry in "${RUNNER_OVERRIDES[@]}"; do
+        [ "${entry%%=*}" = "$repo" ] && { printf '%s' "${entry#*=}"; return 0; }
+    done
+    return 1
+}
+
+# The stub carries two `runs-on:` lines and they are not interchangeable. The
+# gate job is the one that runs on every pull-request commit, so it is the one
+# whose minutes matter; `block-merge` holds a `pull-requests: write` token,
+# runs only after a failure, and stays hosted on purpose. Matching the job by
+# name rather than by position is what keeps an override from ever landing on
+# the wrong one — and if the stub renames the job, nothing is substituted and
+# this reports an error instead of silently rendering the stub unchanged.
+render_stub() {   # render_stub <stub> <label> <job> <outfile>
+    awk -v label="$2" -v job="$3" '
+        # Re-evaluated at EVERY job key, not just ours. Latched on, a gate job
+        # that lost its runs-on line would hand the override to the next job
+        # down — which is block-merge, the one holding the write token.
+        $0 ~ /^  [A-Za-z0-9_.-]+:[[:space:]]*$/ { injob = ($0 ~ "^  " job ":[[:space:]]*$") }
+        injob && !hit && $0 ~ /^    runs-on:/ { print "    runs-on: " label; hit = 1; next }
+        { print }
+        END { exit(hit ? 0 : 1) }
+    ' "$1" > "$4"
+}
+
+# Is the deployed file an acceptable rendering of the stub?
+#
+# For a repository with no override this is never asked: the deployed blob sha
+# IS a git blob sha, so one API call settles it exactly. An overridden
+# repository cannot be checked that way — the label differs by construction,
+# and both repositories that carry an override also carry a comment block
+# explaining the choice at the point the reader meets it.
+#
+# Stripping every comment before comparing would accept that, and would gut the
+# guard while doing it: this stub is mostly comments, and they are the reasoning
+# the repository exists to carry. A stub whose comments can rot on two thirds of
+# the fleet is the drift this script was written to catch.
+#
+# So the contract is narrower than equality and far stronger than similarity:
+# every line of the rendered stub must appear in the deployed file, in order,
+# byte for byte, and every line the deployed file adds on top must be a comment
+# or blank. A repository may annotate. It may not edit, reorder or drop a single
+# line, and it may not add anything that executes. Change one comment in the
+# stub and the line it replaced is no longer there to be found — drift, on the
+# overridden repositories exactly as on every other one.
+stub_covered_by() {   # stub_covered_by <rendered-stub> <deployed-file>
+    awk '
+        NR == FNR { want[++n] = $0; next }
+        bad { next }
+        {
+            if (i < n && $0 == want[i + 1]) { i++; next }
+            if ($0 ~ /^[[:space:]]*(#.*)?$/) next
+            bad = 1
+        }
+        END { exit((!bad && i == n) ? 0 : 1) }
+    ' "$1" "$2"
+}
+
 ensure_stub() {   # -> sets STUB_STATE, PR_URL
     local repo="$1" db="$2" sha out
     PR_URL=""
@@ -104,10 +209,32 @@ ensure_stub() {   # -> sets STUB_STATE, PR_URL
     # was only ever checked for existence, so every later change to it (the
     # identity input, the pull-request comment) sat undeployed on a fleet that
     # reported itself complete.
+    # A repository listed in RUNNER_OVERRIDES is compared against the stub as
+    # rendered for it, and that rendered copy is also what a sync would write —
+    # so --apply can never push the stub's runner back onto a private repo and
+    # quietly restart the meter it was moved off.
+    local label="" want_blob="$STUB_BLOB" want_b64="$STUB_B64" want_file="$STUB_FILE"
+    if label="$(runner_override "$repo")"; then
+        want_file="$WORKDIR/rendered.yml"
+        render_stub "$STUB_FILE" "$label" post-commit "$want_file" \
+            || { STUB_STATE="error:render"; return; }
+        want_blob="$(git hash-object "$want_file")"
+        want_b64="$(base64 -w0 < "$want_file")"
+    fi
+
     local deployed verb title
     deployed="$(gh api "repos/$repo/contents/$STUB_PATH?ref=$db" --jq .sha 2>/dev/null)"
-    if [ -n "$deployed" ] && [ "$deployed" = "$STUB_BLOB" ]; then
+    if [ -n "$deployed" ] && [ "$deployed" = "$want_blob" ]; then
         STUB_STATE="present"; return
+    fi
+    # Only an overridden repository is allowed to be annotated, and only that
+    # case pays for the download the blob-sha comparison above exists to avoid.
+    if [ -n "$deployed" ] && [ -n "$label" ]; then
+        gh api "repos/$repo/contents/$STUB_PATH?ref=$db" --jq .content 2>/dev/null \
+            | base64 -d > "$WORKDIR/deployed.yml" 2>/dev/null
+        if [ -s "$WORKDIR/deployed.yml" ] && stub_covered_by "$want_file" "$WORKDIR/deployed.yml"; then
+            STUB_STATE="present:override"; return
+        fi
     fi
     if [ -n "$deployed" ]; then verb=sync; else verb=add; fi
 
@@ -137,12 +264,12 @@ ensure_stub() {   # -> sets STUB_STATE, PR_URL
         title="ci: add the mandatory post-commit gate"
     fi
     out="$(gh api "repos/$repo/contents/$STUB_PATH" -X PUT -f message="$title" \
-            -f content="$STUB_B64" -f branch="$BRANCH" "${args[@]}" 2>&1)" \
+            -f content="$want_b64" -f branch="$BRANCH" "${args[@]}" 2>&1)" \
         || { STUB_STATE="error:put:${out:0:60}"; return; }
 
     if [ "$verb" = sync ]; then
         PR_URL="$(gh pr create --repo "$repo" --base "$db" --head "$BRANCH" --title "$title" \
-            --body "$SYNC_BODY" 2>&1 | grep -oE 'https://[^ ]+' | head -1)"
+            --body "$SYNC_BODY${label:+$OVERRIDE_NOTE}" 2>&1 | grep -oE 'https://[^ ]+' | head -1)"
         [ -n "$PR_URL" ] && STUB_STATE="sync-created" || STUB_STATE="error:pr"
     else
         PR_URL="$(gh pr create --repo "$repo" --base "$db" --head "$BRANCH" --title "$title" \
@@ -170,6 +297,66 @@ ensure_rule() {   # -> sets RULE_STATE
         && RULE_STATE="created" || RULE_STATE="error:post:${out:0:80}"
 }
 
+
+# --- selftest ---------------------------------------------------------------
+# A runner override exists so that two repositories stop being reported as
+# drift. The failure mode of that kind of change is a comparison that can no
+# longer fail at all — which is strictly worse than no comparison, because it
+# reports green forever and nobody looks again. These cases pin both
+# directions: what an override must accept, and what it must still refuse.
+# Network-free, so tests/run.sh runs them on every pull request here.
+if $SELFTEST; then
+    t_pass=0; t_fail=0
+    t() {   # t <name> <want-rc> <got-rc>
+        if [ "$2" -eq "$3" ]; then t_pass=$((t_pass + 1)); printf '  ok   %s\n' "$1"
+        else t_fail=$((t_fail + 1)); printf '  FAIL %s (want rc %s, got %s)\n' "$1" "$2" "$3"; fi
+    }
+    R="$WORKDIR/rendered.yml"; D="$WORKDIR/deployed.yml"
+
+    echo "== render =="
+    render_stub "$STUB_FILE" self-hosted-x post-commit "$R"
+    t "the gate job's runs-on is substituted" 0 $?
+    grep -qx "    runs-on: self-hosted-x" "$R"; t "...to the override label" 0 $?
+    grep -qx "    runs-on: $STUB_RUNNER" "$R"; t "block-merge keeps the stub runner" 0 $?
+    [ "$(grep -c '^    runs-on:' "$R")" -eq "$(grep -c '^    runs-on:' "$STUB_FILE")" ]
+    t "no runs-on line is added or lost" 0 $?
+    render_stub "$STUB_FILE" self-hosted-x no-such-job "$WORKDIR/x.yml"
+    t "a job the stub does not have is an error, not a silent no-op" 1 $?
+    # The override must never be able to walk downhill into the next job.
+    grep -v '^    runs-on: ' "$STUB_FILE" > "$WORKDIR/noruns.yml"
+    render_stub "$WORKDIR/noruns.yml" self-hosted-x post-commit "$WORKDIR/x.yml"
+    t "a gate job with no runs-on does not hand the label to the next job" 1 $?
+
+    echo "== accepted =="
+    cp "$R" "$D"; stub_covered_by "$R" "$D"
+    t "byte-identical to the rendering" 0 $?
+    awk '/^    runs-on:/ { print "    # why this repository differs"; print "    #"; print "" } { print }' \
+        "$R" > "$D"
+    stub_covered_by "$R" "$D"; t "comments and blanks added on top" 0 $?
+
+    echo "== refused =="
+    # The point of the whole design: an overridden repository is still held to
+    # every other line of the stub, comments included.
+    sed 's|^# post-commit — mandatory merge gate.$|# post-commit - reworded locally|' "$R" > "$D"
+    stub_covered_by "$R" "$D"; t "a stub comment reworded locally" 1 $?
+    grep -v '^  block-merge:$' "$R" > "$D"
+    stub_covered_by "$R" "$D"; t "a stub line dropped" 1 $?
+    awk '/^    timeout-minutes: 10$/ { print "    continue-on-error: true" } { print }' "$R" > "$D"
+    stub_covered_by "$R" "$D"; t "an executable line added" 1 $?
+    tac "$R" > "$D" 2>/dev/null || tail -r "$R" > "$D"
+    stub_covered_by "$R" "$D"; t "the same lines in another order" 1 $?
+    # An override relaxes one line of one job, not the label everywhere: the
+    # token-bearing block-merge job must not be able to follow it off-hosted.
+    render_stub "$STUB_FILE" self-hosted-x block-merge "$D"
+    stub_covered_by "$R" "$D"; t "block-merge moved to the override label" 1 $?
+    # And it is not a blanket pass for the repository either: the file that has
+    # not taken the override is as much drift as any other mismatch.
+    stub_covered_by "$R" "$STUB_FILE"; t "the unrendered stub against an override" 1 $?
+
+    echo ""
+    echo "passed: $t_pass  failed: $t_fail"
+    [ "$t_fail" -eq 0 ]; exit $?
+fi
 
 # --- audit ------------------------------------------------------------------
 # Read-only. A ruleset that exists is not the same as a gate that holds: it can
@@ -234,7 +421,7 @@ for repo in "${TARGETS[@]}"; do
     # repository — dependabot bumps included — until the stub PR merges.
     # devcontainer-template spent a day in exactly that state.
     case "$STUB_STATE" in
-        present|self|stale:*|sync-created) ensure_rule "$repo" ;;
+        present|present:*|self|stale:*|sync-created) ensure_rule "$repo" ;;
         *)            RULE_STATE="deferred:stub-not-merged" ;;
     esac
     ROWS+=("$repo"$'\t'"$db"$'\t'"$STUB_STATE"$'\t'"$RULE_STATE"$'\t'"$PR_URL")
