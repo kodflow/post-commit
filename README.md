@@ -220,6 +220,15 @@ because it is the job that carries a `pull-requests: write` token — and that
 rendering is what both the drift check and `--apply` use, so a sync can never
 push the hosted runner back onto a repository that was moved off it.
 
+**Only a private repository ever gets one.** Visibility is live state that any
+admin can flip, so it is read on every run rather than inferred from the list.
+A listed repository found public or internal is held to the stub — which runs
+hosted — so a scheduled `--apply` opens a pull request moving the gate *back*
+off the fleet, the run carries an `::error::` annotation, and the report row
+says `override refused`. If visibility cannot be read, nothing happens at all:
+neither the self-hosted label nor a sync built on a guess. Being listed is
+necessary, never sufficient.
+
 Everything else still has to match, and *match* keeps its full meaning. An
 overridden repository is not compared loosely and it is not skipped: the
 rendered stub must appear in the deployed file line for line, in order, byte
@@ -227,8 +236,20 @@ for byte, and the only thing the repository may add on top is a comment or a
 blank line. Reword one comment in the stub and the line it replaced is no
 longer there to be found — drift, on an overridden repository exactly as on
 any other. Annotating is allowed; editing, reordering, dropping a line, or
-adding anything that executes is not. `enforce.sh --selftest` pins both
-directions and runs in CI.
+adding anything that executes is not.
+
+"A comment" is a YAML fact, not a textual one. Inside a block scalar — a
+`run: |` script, block-merge's folded `if: >-` — a `#` line is content and a
+blank line is a newline: an "annotation" dropped into the `if:` puts `#` inside
+`${{ }}`, and the workflow stops loading. So where an extra line may go is read
+off the stub's own structure: never inside a block scalar, and after one only
+at a depth that ends it.
+
+`enforce.sh --selftest` pins all of this, including an oracle that inserts a
+probe at every gap of the stub and requires that nothing the check accepts
+parses, under a real YAML parser, to anything but the stub. `tests/run.sh`
+drives the real script end to end against `tests/fake-gh.sh` — override
+selection, visibility, downloads, and what `--apply` writes to whom.
 
 An exclusion list would have been shorter and would have made these
 repositories blind to every future change to the stub — which is the failure
