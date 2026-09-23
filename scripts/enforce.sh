@@ -429,7 +429,9 @@ if $SELFTEST; then
     # tripwire in front of it.
     runner_override supervizio/runner-template >/dev/null
     t "supervizio/runner-template has no override" 1 $?
-    for entry in "${RUNNER_OVERRIDES[@]}"; do
+    # Guarded like runner_override: bash before 4.4 calls an empty array unbound
+    # under `set -u`, and an empty list is the end state this must survive.
+    for entry in ${RUNNER_OVERRIDES[@]+"${RUNNER_OVERRIDES[@]}"}; do
         # Non-empty, not just found: `owner/repo=` would render `runs-on:` with
         # nothing after it, and that file does not load at all.
         if [ -n "$(runner_override "${entry%%=*}")" ]; then rc=0; else rc=1; fi
