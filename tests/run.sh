@@ -714,6 +714,105 @@ else
 fi
 
 
+# The fleet enforcer. Its comparison helpers are pinned by its own --selftest.
+# Everything those cannot reach — choosing an override, reading visibility,
+# downloading the deployed file, what --apply writes and to whom — runs here,
+# through the real script, with tests/fake-gh.sh standing in for the API.
+echo "== enforce: selftest =="
+if out="$(bash "$ROOT/scripts/enforce.sh" --selftest 2>&1)"; then
+    PASS=$((PASS+1)); printf '  ok   enforce.sh --selftest\n'
+else
+    FAIL=$((FAIL+1)); printf '  FAIL enforce.sh --selftest\n%s\n' "$(printf '%s' "$out" | sed 's/^/       /')"
+fi
+# The YAML oracle is optional on a laptop and mandatory in CI: an oracle that
+# can skip itself where it matters is the dead guard again, one level up.
+if [ -n "${CI:-}" ]; then
+    if grep -q '^  ok   oracle: nothing accepted' <<< "$out"; then
+        PASS=$((PASS+1)); echo "  ok   the YAML oracle ran"
+    else
+        FAIL=$((FAIL+1)); echo "  FAIL the YAML oracle did not run in CI (no python3 with PyYAML?)"
+    fi
+fi
+
+echo "== enforce: end to end, against a fake gh =="
+FAKEBIN="$(mktemp -d)"; ln -s "$ROOT/tests/fake-gh.sh" "$FAKEBIN/gh"
+STUB="$ROOT/stub/post-commit.yml"
+# What an overridden repository must carry, derived here WITHOUT render_stub —
+# the stub's first runs-on is the gate job's — so this is not the code grading
+# its own homework. Then what agent and libprobe really add on top: a comment
+# at each of the two places they differ.
+RENDERED="$(mktemp)"; ANNOTATED="$(mktemp)"; INSCALAR="$(mktemp)"; REWORDED="$(mktemp)"
+awk '!d && /^    runs-on: ubuntu-latest$/ { print "    runs-on: supervizio-runner"; d = 1; next } { print }' "$STUB" > "$RENDERED"
+awk '/^  post-commit:$/ { print; print "    # Self-hosted: private, and hosted minutes are billed here."; next }
+     /^    runs-on: ubuntu-latest$/ { print "    # Stays hosted on purpose: this job holds the write token." }
+     { print }' "$RENDERED" > "$ANNOTATED"
+awk '{ print } /^      \$\{\{ failure\(\)$/ { print "      # an annotation inside the if: expression" }' "$RENDERED" > "$INSCALAR"
+sed 's|^# post-commit — mandatory merge gate.$|# post-commit - reworded locally|' "$RENDERED" > "$REWORDED"
+
+efx() {   # efx <owner/repo> <visibility|-> <deployed-file|-> [flag-file...] -> a fixture dir
+    local d repo="$1" f; d="$(mktemp -d)"; mkdir -p "$d/$repo"
+    [ "$2" = - ] || printf '%s' "$2" > "$d/$repo/visibility"
+    [ "$3" = - ] || cp "$3" "$d/$repo/workflow.yml"
+    shift 3; for f in "$@"; do : > "$d/$repo/$f"; done
+    printf '%s' "$d"
+}
+erun() {  # erun <fixture> [enforce.sh args...]: the real script, the fake API
+    local fx="$1"; shift
+    FAKE_GH_DIR="$fx" PATH="$FAKEBIN:$PATH" bash "$ROOT/scripts/enforce.sh" "$@" 2>&1
+}
+eok() {   # eok <name> <rc>
+    if [ "$2" -eq 0 ]; then PASS=$((PASS+1)); printf '  ok   %s\n' "$1"
+    else FAIL=$((FAIL+1)); printf '  FAIL %s\n%s\n' "$1" "$(printf '%s' "$EOUT" | sed 's/^/       /')"; fi
+}
+put() {   # put <fixture> <owner/repo>: what a contents PUT wrote, decoded
+    base64 -d < "$1/$2/put.b64" > "$1/put.yml" 2>/dev/null; printf '%s' "$1/put.yml"
+}
+
+fx="$(efx supervizio/agent private "$ANNOTATED")"; EOUT="$(erun "$fx" supervizio/agent)"
+grep -q 'stub=present:override ' <<< "$EOUT"; eok "private, listed, annotated: present:override" $?
+grep -qx 'api repos/supervizio/agent --jq .visibility' "$fx/calls.log"; eok "...visibility read on this run, not assumed" $?
+
+fx="$(efx supervizio/runner-template public "$STUB")"; EOUT="$(erun "$fx" supervizio/runner-template)"
+grep -q 'stub=present ' <<< "$EOUT"; eok "not listed, byte-identical: present" $?
+! grep -qE -- '--jq \.(content|visibility)$' "$fx/calls.log"; eok "...by blob sha alone: no download, no visibility lookup" $?
+
+fx="$(efx supervizio/agent private "$REWORDED")"; EOUT="$(erun "$fx" supervizio/agent)"
+grep -q 'stub=stale:would-sync ' <<< "$EOUT"; eok "listed, a stub comment reworded: drift" $?
+
+fx="$(efx supervizio/agent private "$INSCALAR")"; EOUT="$(erun "$fx" supervizio/agent)"
+grep -q 'stub=stale:would-sync ' <<< "$EOUT"; eok "listed, an annotation inside the if: expression: drift" $?
+
+# The hosted stub on a listed repository is what merging a sync like agent#230
+# would leave behind. It is drift, so the next run puts the label back.
+fx="$(efx supervizio/agent private "$STUB")"; EOUT="$(erun "$fx" --apply supervizio/agent)"
+grep -q 'stub=sync-created ' <<< "$EOUT"; eok "listed, hosted stub deployed, --apply: a sync is opened" $?
+cmp -s "$(put "$fx" supervizio/agent)" "$RENDERED"; eok "...writing the rendering byte for byte: gate job on the fleet" $?
+grep -q 'carries a runner override' "$fx/supervizio/agent/pr.body"; eok "...and the pull request says why" $?
+
+# SECURITY. A self-hosted gate on a repository anyone can fork runs strangers'
+# pull requests on the fleet. Listing a repository must never be enough.
+fx="$(efx supervizio/agent public "$ANNOTATED")"; EOUT="$(erun "$fx" supervizio/agent)"
+! grep -q 'present:override' <<< "$EOUT"; eok "SECURITY listed but public: never present:override" $?
+grep -q 'stub=stale:would-sync .*override refused: public' <<< "$EOUT"; eok "SECURITY ...it is drift, and the row says why" $?
+grep -q '^::error::supervizio/agent is public' <<< "$EOUT"; eok "SECURITY ...with an error annotation on the run" $?
+fx="$(efx supervizio/agent public "$ANNOTATED")"; EOUT="$(erun "$fx" --apply supervizio/agent)"
+cmp -s "$(put "$fx" supervizio/agent)" "$STUB"; eok "SECURITY --apply writes the stub itself: gate back on hosted" $?
+grep -q 'back to a hosted runner, on purpose' "$fx/supervizio/agent/pr.body"; eok "SECURITY ...and the pull request says it is on purpose" $?
+fx="$(efx supervizio/agent public "$STUB")"; EOUT="$(erun "$fx" --apply supervizio/agent)"
+! grep -qE -- 'contents/[^ ]* -X PUT|^pr create' "$fx/calls.log"; eok "SECURITY listed but public, already hosted: workflow untouched" $?
+fx="$(efx supervizio/agent internal "$ANNOTATED")"; EOUT="$(erun "$fx" supervizio/agent)"
+grep -q 'override refused: internal' <<< "$EOUT"; eok "SECURITY internal is not private either" $?
+fx="$(efx supervizio/runner-template public "$RENDERED")"; EOUT="$(erun "$fx" --apply supervizio/runner-template)"
+cmp -s "$(put "$fx" supervizio/runner-template)" "$STUB"; eok "SECURITY runner-template moved onto the fleet by hand: repaired to hosted" $?
+
+fx="$(efx supervizio/agent - "$ANNOTATED")"; EOUT="$(erun "$fx" --apply supervizio/agent)"
+grep -q 'stub=error:visibility ' <<< "$EOUT"; eok "visibility unreadable: an error, not a guess" $?
+! grep -qE -- '--jq \.content$|-X PUT|^pr create' "$fx/calls.log"; eok "...no download, no write, no pull request" $?
+
+fx="$(efx supervizio/agent private "$ANNOTATED" content_fails)"; EOUT="$(erun "$fx" --apply supervizio/agent)"
+grep -q 'stub=error:download ' <<< "$EOUT"; eok "deployed file unreadable: an error, not drift" $?
+! grep -qE -- '-X PUT|^pr create' "$fx/calls.log"; eok "...no write, no pull request" $?
+
 echo "== usage errors (expect 2) =="
 d=$(mkrepo)
 out="$(cd "$d" && bash "$GATE" 2>&1)"; rc=$?

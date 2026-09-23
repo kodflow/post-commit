@@ -191,6 +191,71 @@ scripts/enforce.sh --apply --all        # every non-fork, non-archived repo you 
 
 Idempotent: re-running never duplicates a PR or a ruleset.
 
+### When a repository must differ: runner overrides
+
+Drift is detected by blob sha, so any difference at all is drift — and a
+scheduled `--apply` reopens the same pull request every morning until the
+difference is gone. That is the right default, and it is wrong for one line.
+
+A **private** repository bills GitHub-hosted minutes for every run of this
+gate, rounded up to a whole minute per job, for a composite action that is
+`actions/checkout` plus bash. On a busy repository that is hundreds of
+billable minutes a month to learn nothing a self-hosted runner would not have
+told you for free. A **public** repository is the exact opposite: its hosted
+minutes are free, and pointing its pull requests at a self-hosted runner would
+let an untrusted fork run code on that runner. So this cannot be settled in
+the stub — it has to be settled per repository.
+
+`RUNNER_OVERRIDES` in `scripts/enforce.sh` is that list, `owner/repo=label`:
+
+```sh
+RUNNER_OVERRIDES=(
+    "supervizio/agent=supervizio-runner"
+)
+```
+
+An override changes **one line of one job**. The stub is rendered for the
+repository — the gate job takes the label, `block-merge` keeps `ubuntu-latest`
+because it is the job that carries a `pull-requests: write` token — and that
+rendering is what both the drift check and `--apply` use, so a sync can never
+push the hosted runner back onto a repository that was moved off it.
+
+**Only a private repository ever gets one.** Visibility is live state that any
+admin can flip, so it is read on every run rather than inferred from the list.
+A listed repository found public or internal is held to the stub — which runs
+hosted — so a scheduled `--apply` opens a pull request moving the gate *back*
+off the fleet, the run carries an `::error::` annotation, and the report row
+says `override refused`. If visibility cannot be read, nothing happens at all:
+neither the self-hosted label nor a sync built on a guess. Being listed is
+necessary, never sufficient.
+
+Everything else still has to match, and *match* keeps its full meaning. An
+overridden repository is not compared loosely and it is not skipped: the
+rendered stub must appear in the deployed file line for line, in order, byte
+for byte, and the only thing the repository may add on top is a comment or a
+blank line. Reword one comment in the stub and the line it replaced is no
+longer there to be found — drift, on an overridden repository exactly as on
+any other. Annotating is allowed; editing, reordering, dropping a line, or
+adding anything that executes is not.
+
+"A comment" is a YAML fact, not a textual one. Inside a block scalar — a
+`run: |` script, block-merge's folded `if: >-` — a `#` line is content and a
+blank line is a newline: an "annotation" dropped into the `if:` puts `#` inside
+`${{ }}`, and the workflow stops loading. So where an extra line may go is read
+off the stub's own structure: never inside a block scalar, and after one only
+at a depth that ends it.
+
+`enforce.sh --selftest` pins all of this, including an oracle that inserts a
+probe at every gap of the stub and requires that nothing the check accepts
+parses, under a real YAML parser, to anything but the stub. `tests/run.sh`
+drives the real script end to end against `tests/fake-gh.sh` — override
+selection, visibility, downloads, and what `--apply` writes to whom.
+
+An exclusion list would have been shorter and would have made these
+repositories blind to every future change to the stub — which is the failure
+this script exists to catch. A check that can no longer fail is worse than no
+check, because it reports green forever and nobody looks again.
+
 ### What GitHub cannot enforce
 
 - **Private repositories in a Free organisation** have neither rulesets nor
