@@ -26,7 +26,7 @@ jobs:
         run: |
           python3 - <<'PY'
           import yaml, glob
-          for f in ['action.yml', 'stub/post-commit.yml'] + sorted(glob.glob('.github/workflows/*.yml')):
+          for f in ['action.yml', 'block-merge/action.yml', 'stub/post-commit.yml'] + sorted(glob.glob('.github/workflows/*.yml')):
               yaml.safe_load(open(f)); print('ok', f)
           PY
 

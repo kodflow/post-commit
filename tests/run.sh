@@ -738,13 +738,13 @@ echo "== enforce: end to end, against a fake gh =="
 FAKEBIN="$(mktemp -d)"; ln -s "$ROOT/tests/fake-gh.sh" "$FAKEBIN/gh"
 STUB="$ROOT/stub/post-commit.yml"
 # What an overridden repository must carry, derived here WITHOUT render_stub —
-# the stub's first runs-on is the gate job's — so this is not the code grading
-# its own homework. Then what agent and libprobe really add on top: a comment
-# at each of the two places they differ.
+# every job's runs-on is the stub's hosted runner, and every one moves — so
+# this is not the code grading its own homework. Then what a repository might
+# add on top: a comment at each of the two places it differs.
 RENDERED="$(mktemp)"; ANNOTATED="$(mktemp)"; INSCALAR="$(mktemp)"; REWORDED="$(mktemp)"
-awk '!d && /^    runs-on: ubuntu-latest$/ { print "    runs-on: supervizio-runner"; d = 1; next } { print }' "$STUB" > "$RENDERED"
+sed 's|^    runs-on: ubuntu-latest$|    runs-on: supervizio-runner|' "$STUB" > "$RENDERED"
 awk '/^  post-commit:$/ { print; print "    # Self-hosted: private, and hosted minutes are billed here."; next }
-     /^    runs-on: ubuntu-latest$/ { print "    # Stays hosted on purpose: this job holds the write token." }
+     /^    runs-on: supervizio-runner$/ && ++n == 2 { print "    # Self-hosted too: only ever this repository'"'"'s token." }
      { print }' "$RENDERED" > "$ANNOTATED"
 awk '{ print } /^      \$\{\{ failure\(\)$/ { print "      # an annotation inside the if: expression" }' "$RENDERED" > "$INSCALAR"
 sed 's|^# post-commit — mandatory merge gate.$|# post-commit - reworded locally|' "$RENDERED" > "$REWORDED"
@@ -758,8 +758,16 @@ efx() {   # efx <owner/repo> <visibility|-> <deployed-file|-> [flag-file...] -> 
 }
 erun() {  # erun <fixture> [enforce.sh args...]: the real script, the fake API
     local fx="$1"; shift
-    FAKE_GH_DIR="$fx" PATH="$FAKEBIN:$PATH" bash "$ROOT/scripts/enforce.sh" "$@" 2>&1
+    FAKE_GH_DIR="$fx" PATH="$FAKEBIN:$PATH" bash "${ENFORCE:-$ROOT/scripts/enforce.sh}" "$@" 2>&1
 }
+# The real list covers whole owners. An entry NAMING a repository behaves
+# differently on a public one — it is an error someone must hear about — so that
+# path runs against a copy of the real script with one such entry added.
+NAMED="$(mktemp -d)"; mkdir -p "$NAMED/scripts"; ln -s "$ROOT/stub" "$NAMED/stub"
+awk '{ print } $0 == "RUNNER_OVERRIDES=(" { print "    \"supervizio/agent=supervizio-runner\"" }' \
+    "$ROOT/scripts/enforce.sh" > "$NAMED/scripts/enforce.sh"
+grep -qx '    "supervizio/agent=supervizio-runner"' "$NAMED/scripts/enforce.sh" \
+    || { FAIL=$((FAIL+1)); echo "  FAIL could not add a repository entry to the copy"; }
 eok() {   # eok <name> <rc>
     if [ "$2" -eq 0 ]; then PASS=$((PASS+1)); printf '  ok   %s\n' "$1"
     else FAIL=$((FAIL+1)); printf '  FAIL %s\n%s\n' "$1" "$(printf '%s' "$EOUT" | sed 's/^/       /')"; fi
@@ -772,9 +780,15 @@ fx="$(efx supervizio/agent private "$ANNOTATED")"; EOUT="$(erun "$fx" supervizio
 grep -q 'stub=present:override ' <<< "$EOUT"; eok "private, listed, annotated: present:override" $?
 grep -qx 'api repos/supervizio/agent --jq .visibility' "$fx/calls.log"; eok "...visibility read on this run, not assumed" $?
 
-fx="$(efx supervizio/runner-template public "$STUB")"; EOUT="$(erun "$fx" supervizio/runner-template)"
-grep -q 'stub=present ' <<< "$EOUT"; eok "not listed, byte-identical: present" $?
+fx="$(efx someone-else/some-repo private "$STUB")"; EOUT="$(erun "$fx" someone-else/some-repo)"
+grep -q 'stub=present ' <<< "$EOUT"; eok "not covered, byte-identical: present" $?
 ! grep -qE -- '--jq \.(content|visibility)$' "$fx/calls.log"; eok "...by blob sha alone: no download, no visibility lookup" $?
+
+# Covered by its owner's entry, and public: the entry does not apply, and that
+# is the normal case for a public repository, not an error.
+fx="$(efx supervizio/runner-template public "$STUB")"; EOUT="$(erun "$fx" supervizio/runner-template)"
+grep -q 'stub=present ' <<< "$EOUT"; eok "SECURITY owner covered, public, hosted stub: present" $?
+! grep -q '::error::\|override refused' <<< "$EOUT"; eok "...quietly: an owner entry is not a mistake on a public repo" $?
 
 fx="$(efx supervizio/agent private "$REWORDED")"; EOUT="$(erun "$fx" supervizio/agent)"
 grep -q 'stub=stale:would-sync ' <<< "$EOUT"; eok "listed, a stub comment reworded: drift" $?
@@ -790,7 +804,15 @@ cmp -s "$(put "$fx" supervizio/agent)" "$RENDERED"; eok "...writing the renderin
 grep -q 'carries a runner override' "$fx/supervizio/agent/pr.body"; eok "...and the pull request says why" $?
 
 # SECURITY. A self-hosted gate on a repository anyone can fork runs strangers'
-# pull requests on the fleet. Listing a repository must never be enough.
+# pull requests on the fleet. Being covered must never be enough.
+fx="$(efx supervizio/agent public "$ANNOTATED")"; EOUT="$(erun "$fx" supervizio/agent)"
+! grep -q 'present:override' <<< "$EOUT"; eok "SECURITY owner covered but public: never present:override" $?
+grep -q 'stub=stale:would-sync ' <<< "$EOUT"; eok "SECURITY ...it is drift" $?
+fx="$(efx supervizio/agent public "$ANNOTATED")"; EOUT="$(erun "$fx" --apply supervizio/agent)"
+cmp -s "$(put "$fx" supervizio/agent)" "$STUB"; eok "SECURITY ...and --apply writes the stub itself: back on hosted" $?
+
+# The same, with an entry that names the repository: now it is loud.
+ENFORCE="$NAMED/scripts/enforce.sh"
 fx="$(efx supervizio/agent public "$ANNOTATED")"; EOUT="$(erun "$fx" supervizio/agent)"
 ! grep -q 'present:override' <<< "$EOUT"; eok "SECURITY listed but public: never present:override" $?
 grep -q 'stub=stale:would-sync .*override refused: public' <<< "$EOUT"; eok "SECURITY ...it is drift, and the row says why" $?
@@ -802,6 +824,7 @@ fx="$(efx supervizio/agent public "$STUB")"; EOUT="$(erun "$fx" --apply superviz
 ! grep -qE -- 'contents/[^ ]* -X PUT|^pr create' "$fx/calls.log"; eok "SECURITY listed but public, already hosted: workflow untouched" $?
 fx="$(efx supervizio/agent internal "$ANNOTATED")"; EOUT="$(erun "$fx" supervizio/agent)"
 grep -q 'override refused: internal' <<< "$EOUT"; eok "SECURITY internal is not private either" $?
+unset ENFORCE
 fx="$(efx supervizio/runner-template public "$RENDERED")"; EOUT="$(erun "$fx" --apply supervizio/runner-template)"
 cmp -s "$(put "$fx" supervizio/runner-template)" "$STUB"; eok "SECURITY runner-template moved onto the fleet by hand: repaired to hosted" $?
 
@@ -812,6 +835,41 @@ grep -q 'stub=error:visibility ' <<< "$EOUT"; eok "visibility unreadable: an err
 fx="$(efx supervizio/agent private "$ANNOTATED" content_fails)"; EOUT="$(erun "$fx" --apply supervizio/agent)"
 grep -q 'stub=error:download ' <<< "$EOUT"; eok "deployed file unreadable: an error, not drift" $?
 ! grep -qE -- '-X PUT|^pr create' "$fx/calls.log"; eok "...no write, no pull request" $?
+
+echo "== block-merge pin =="
+# The gate at @main, the token-bearing action at a full SHA — and the script
+# that moves that SHA, driven for real in a throwaway repository.
+bok() {   # bok <name> <rc>
+    if [ "$2" -eq 0 ]; then PASS=$((PASS+1)); printf '  ok   %s\n' "$1"
+    else FAIL=$((FAIL+1)); printf '  FAIL %s\n' "$1"; fi
+}
+n="$(grep -cE '^      - uses: kodflow/post-commit/block-merge@[0-9a-f]{40}  # [0-9]{4}-[0-9]{2}-[0-9]{2}$' "$STUB")"
+bok "the stub pins block-merge to a full SHA, dated" $(( n == 1 ? 0 : 1 ))
+! grep -qE 'block-merge@(main|master|v[0-9])' "$STUB"; bok "...never to a branch or a tag" $?
+grep -qx '      - uses: kodflow/post-commit@main' "$STUB"; bok "the gate stays at @main" $?
+
+b="$(mktemp -d)"; mkdir -p "$b/scripts" "$b/stub" "$b/block-merge"
+cp "$ROOT/scripts/bump-block-merge.sh" "$b/scripts/"; cp "$STUB" "$b/stub/"
+cp "$ROOT/block-merge/action.yml" "$b/block-merge/"
+git -C "$b" init -q; git -C "$b" config user.email t@t; git -C "$b" config user.name t
+git -C "$b" add -A; git -C "$b" commit -qm "chore: one"
+echo "# two" >> "$b/block-merge/action.yml"; git -C "$b" commit -qam "fix: two"
+c2="$(git -C "$b" rev-parse HEAD)"
+echo "# unrelated" >> "$b/scripts/bump-block-merge.sh"; git -C "$b" commit -qam "chore: three"
+REF=HEAD bash "$b/scripts/bump-block-merge.sh" >/dev/null 2>&1; bok "bump runs" $?
+grep -qE "^      - uses: kodflow/post-commit/block-merge@$c2  # " "$b/stub/post-commit.yml"
+bok "...pinning the last commit that touched block-merge/, not the tip" $?
+n="$(diff "$STUB" "$b/stub/post-commit.yml" | grep -c '^[<>]')"
+bok "...changing that line and no other" $(( n == 2 ? 0 : 1 ))
+REF=HEAD bash "$b/scripts/bump-block-merge.sh" --check >/dev/null 2>&1; bok "--check after a bump: current" $?
+git -C "$b" commit -qam "ci: pin"
+echo "# four" >> "$b/block-merge/action.yml"; git -C "$b" commit -qam "fix: four"
+REF=HEAD bash "$b/scripts/bump-block-merge.sh" --check >/dev/null 2>&1; bok "--check once block-merge moved on: behind (rc 1)" $(( $? == 1 ? 0 : 1 ))
+git -C "$b" switch -qc side; echo "# side" >> "$b/block-merge/action.yml"; git -C "$b" commit -qam "fix: side"
+side="$(git -C "$b" rev-parse HEAD)"; git -C "$b" switch -q -
+REF=HEAD bash "$b/scripts/bump-block-merge.sh" "$side" >/dev/null 2>&1; bok "a commit main does not contain is refused (rc 1)" $(( $? == 1 ? 0 : 1 ))
+grep -q "block-merge@$side" "$b/stub/post-commit.yml"; bok "...and not written" $(( $? == 0 ? 1 : 0 ))
+rm -rf "$b"
 
 echo "== usage errors (expect 2) =="
 d=$(mkrepo)

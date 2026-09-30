@@ -1,0 +1,110 @@
+# kodflow/post-commit/block-merge — what the stub's `block-merge` job runs
+# once the gate has failed on a pull request: the verdict goes on the pull
+# request as one comment rewritten in place, and the pull request goes back
+# into draft if the head it judged is still the head.
+#
+# This used to be ~70 lines of shell copied into every repository's stub. It
+# lives here now so that a fix to it is live on the next run everywhere, like
+# the rules themselves.
+#
+# The job CONDITIONS stay in the stub and must: `if:` is a job key, and a job
+# that is never started is the only way to keep the write token away from the
+# push, manual and fork runs. This action assumes the stub already filtered —
+# it runs only for a non-draft pull request from this repository whose gate
+# failed.
+#
+# Trust: the calling job holds `pull-requests: write` and hands it to this
+# action at @main. That is the same trust every repository already places in
+# kodflow/post-commit@main to decide whether it may merge at all, and it is
+# what a reusable workflow at @main would have required too. What still holds
+# is that the GATE job never sees a write token: it runs with contents: read.
+name: post-commit block-merge
+description: >-
+  Fallback for the post-commit gate on a pull request: post the verdict as a
+  single comment rewritten in place, state whether a ruleset enforces it, and
+  put the pull request back into draft if the head it judged is still the head.
+
+inputs:
+  report:
+    description: The gate's `report` output (markdown). Empty is accepted and said so.
+    default: ''
+  token:
+    description: 'A token with `pull-requests: write` on the calling repository.'
+    default: ${{ github.token }}
+
+runs:
+  using: composite
+  steps:
+    # The verdict, where the author will actually read it. The job summary
+    # needs someone to open the run; a pull-request comment does not.
+    #
+    # The comment also answers the question the run cannot: is this refusal
+    # enforced here? A private repository in a Free-plan org gets no ruleset,
+    # so the red status stops nothing and saying so plainly is the only
+    # honest thing left. One comment per pull request, rewritten in place.
+    - name: post the verdict on the pull request
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        PR: ${{ github.event.pull_request.number }}
+        REPO: ${{ github.repository }}
+        REPORT: ${{ inputs.report }}
+        RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      run: |
+        MARKER='<!-- post-commit-verdict -->'
+
+        # Is the status actually required here, and can it be bypassed?
+        # Three answers, three different messages — a missing ruleset someone
+        # can still create is a defect; one GitHub refuses to create is not.
+        RULESETS="$(gh api "repos/$REPO/rulesets" 2>&1 || true)"
+        if printf '%s' "$RULESETS" | grep -q 'Upgrade to GitHub'; then
+            ENFORCEMENT=$'> [!WARNING]\n> **Nothing here stops this merge.** GitHub does not offer rulesets on a\n> private repository in a Free-plan org, so `post-commit` can run but can\n> never be a required status. The pull request has been put back into draft,\n> which raises the cost of merging a bad history — it does not prevent it.\n>\n> To make it real: move the org to a paid plan, or make this repository\n> public. Then run `scripts/enforce.sh --apply '"$REPO"'`.'
+        elif printf '%s' "$RULESETS" | jq -e '[.[]|select(.name=="post-commit")]|length>0' >/dev/null 2>&1; then
+            ENFORCEMENT='> The `post-commit` ruleset requires this status, so the merge is refused until it is green.'
+        else
+            ENFORCEMENT=$'> [!WARNING]\n> This repository has **no `post-commit` ruleset**, so the red status blocks\n> nothing on its own. Create it with `scripts/enforce.sh --apply '"$REPO"'`.'
+        fi
+
+        BODY="$(printf '%s\n\n%s\n\n%s\n\n---\n<sub>[full run](%s) · rules live in [kodflow/post-commit](https://github.com/kodflow/post-commit) · this comment is rewritten in place, not repeated</sub>\n' \
+            "$MARKER" "$ENFORCEMENT" "${REPORT:-The gate produced no report — see the run.}" "$RUN_URL")"
+
+        ID="$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
+              --jq "[.[]|select(.body|contains(\"$MARKER\"))|.id]|first // empty" 2>/dev/null || true)"
+        if [ -n "$ID" ]; then
+            gh api "repos/$REPO/issues/comments/$ID" -X PATCH -f body="$BODY" >/dev/null \
+                && echo "::notice::verdict comment updated" \
+                || echo "::warning::could not update the verdict comment"
+        else
+            gh api "repos/$REPO/issues/$PR/comments" -f body="$BODY" >/dev/null \
+                && echo "::notice::verdict comment posted" \
+                || echo "::warning::could not post the verdict comment"
+        fi
+
+    # Cancellation narrows the race but does not close it: this job can
+    # already be running when a newer commit lands. Only act if the head
+    # this run judged is still the head, or a stale failure would undo a
+    # ready state that a later, passing commit earned.
+    #
+    # Narrowed, not closed: reading the head and drafting are two calls, so a
+    # commit landing between them is still drafted on a stale verdict. GitHub
+    # offers no compare-and-swap for draft state. The consequence is mild — a
+    # spurious draft, and the newer run's green status is what the ruleset
+    # actually reads — but it is not zero.
+    - name: put the pull request back into draft
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        PR: ${{ github.event.pull_request.number }}
+        REPO: ${{ github.repository }}
+        JUDGED: ${{ github.event.pull_request.head.sha }}
+      run: |
+        CURRENT="$(gh pr view "$PR" -R "$REPO" --json headRefOid --jq .headRefOid)"
+        if [ "$CURRENT" != "$JUDGED" ]; then
+            echo "::notice::head moved on from ${JUDGED:0:8} to ${CURRENT:0:8}; the newer run owns the verdict. Not drafting."
+            exit 0
+        fi
+        if gh pr ready --undo "$PR" -R "$REPO"; then
+            echo "::notice::post-commit failed — pull request put back into draft. Fix the history, then mark it ready: that re-runs the gate."
+        else
+            echo "::warning::post-commit failed and the pull request could not be drafted. If this repository carries the post-commit ruleset the merge is still refused; if it cannot carry one, nothing here stops it."
+        fi

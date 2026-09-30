@@ -37,7 +37,8 @@ already runs those on GitHub, so `--no-verify` never bypassed them.
 | `passed` | `"true"` when the gate found nothing, `"false"` otherwise |
 | `report` | the verdict as markdown — the same text the job summary carries, capped at 60 kB |
 
-`report` is what the stub posts on the pull request. The gate runs in a step
+`report` is what the stub's `block-merge` job hands to
+`kodflow/post-commit/block-merge`, which posts it on the pull request. The gate runs in a step
 that always exits 0 and a separate step carries the verdict, because a
 composite step that fails takes its outputs down with it — and the one job
 that needs the report is the one reacting to a failure.
@@ -128,30 +129,101 @@ which lives in a commit and needs `scripts/rewrite-history.sh`.
 
 ## Install
 
-`.github/workflows/post-commit.yml` in the target repo (`stub/post-commit.yml` here):
+`.github/workflows/post-commit.yml` in the target repo is `stub/post-commit.yml`,
+copied verbatim — `enforce.sh` does it and keeps it in sync. Stripped of its
+comments it is this:
 
 ```yaml
 name: post-commit
 on:
   pull_request:
-    types: [opened, synchronize, reopened]
+    types: [opened, synchronize, reopened, ready_for_review]
   push:
     branches: [main, master]
+  workflow_dispatch:
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 permissions:
   contents: read
 jobs:
   post-commit:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest        # the owner's self-hosted label on a private repo
     timeout-minutes: 10
+    outputs:
+      report: ${{ steps.gate.outputs.report }}
     steps:
       - uses: kodflow/post-commit@main
+        id: gate
         with:
           authors: kodflow
+  block-merge:
+    needs: post-commit
+    if: >-
+      ${{ failure()
+          && github.event_name == 'pull_request'
+          && github.event.pull_request.draft == false
+          && github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: ubuntu-latest        # same label as the job above
+    timeout-minutes: 5
+    permissions:
+      pull-requests: write
+    steps:
+      - uses: kodflow/post-commit/block-merge@<full sha>  # <date>
+        with:
+          report: ${{ needs['post-commit'].outputs.report }}
 ```
 
 The job **must** be named `post-commit`: that is the status the ruleset
-requires. `@main` is deliberate — pinning a SHA freezes a repo out of every
-future fix. Don't pin it, don't copy the logic in.
+requires. The gate's `@main` is deliberate — it holds `contents: read` and
+nothing else, and pinning a SHA would freeze a repo out of every future fix.
+Don't pin it, don't copy the logic in.
+
+`block-merge` is the opposite case and is **pinned to a full commit SHA**: it
+is the one job holding a `pull-requests: write` token, and `@main` would hand
+that token to whatever `@main` becomes. See *Moving the block-merge pin*.
+
+`block-merge` is the fallback for a failed pull request: it comments the
+verdict (one comment, rewritten in place, saying whether a ruleset actually
+enforces it) and puts the pull request back into draft if the head it judged is
+still the head. Its logic lives in `block-merge/action.yml`; only its `if:`
+stays in the stub, because a job that never starts is what keeps its
+`pull-requests: write` token away from push, manual and fork runs, and away
+from the gate job.
+
+**Why not a reusable workflow.** It would shrink the stub further, and it
+fails on the two things that matter here. A called job reports as
+`<caller job> / <called job>`, never as a bare `post-commit`, so every
+ruleset would stop matching and every merge would block until each one is
+migrated. And GitHub lets a called workflow use the caller's self-hosted
+runners only when both belong to the same user or organization: kodflow/post-commit
+belongs to `kodflow`, so from `supervizio` or `kitsunium` the gate could not
+run on their runners at all. A composite action has neither limit — it runs
+inside the caller's job, on the caller's runner, under the caller's job name.
+
+### Moving the block-merge pin
+
+A change to `block-merge/action.yml` reaches no repository until the pin moves,
+and the pin moves in one place:
+
+```sh
+git fetch origin
+scripts/bump-block-merge.sh --check   # is the stub pinned to main's latest block-merge commit?
+scripts/bump-block-merge.sh           # rewrite the pin to it, dated
+# commit stub/post-commit.yml, open a PR, merge it
+```
+
+The script pins the last commit on `origin/main` that touched `block-merge/`,
+refuses a commit `main` does not contain (a squashed branch's commit survives
+only as long as some ref keeps it), and changes that one line. Rolling it out
+is then `enforce.sh`'s ordinary job: every deployed stub now differs from the
+central one, so the next enforce run — nightly, or
+`scripts/enforce.sh --apply --all` — opens a sync pull request on every
+repository.
+
+The first pin is the commit that introduced the action. Merge that pull request
+with a **merge commit**, not a squash, so the pinned commit is on `main`; if it
+is squashed, run the script once afterwards.
 
 ### Inputs
 
@@ -195,7 +267,7 @@ Idempotent: re-running never duplicates a PR or a ruleset.
 
 Drift is detected by blob sha, so any difference at all is drift — and a
 scheduled `--apply` reopens the same pull request every morning until the
-difference is gone. That is the right default, and it is wrong for one line.
+difference is gone. That is the right default, and it is wrong for one key.
 
 A **private** repository bills GitHub-hosted minutes for every run of this
 gate, rounded up to a whole minute per job, for a composite action that is
@@ -206,27 +278,38 @@ minutes are free, and pointing its pull requests at a self-hosted runner would
 let an untrusted fork run code on that runner. So this cannot be settled in
 the stub — it has to be settled per repository.
 
-`RUNNER_OVERRIDES` in `scripts/enforce.sh` is that list, `owner/repo=label`:
+`RUNNER_OVERRIDES` in `scripts/enforce.sh` is that list. `owner=label` covers
+every private repository of an owner; `owner/repo=label` names one repository
+and wins over its owner's entry:
 
 ```sh
 RUNNER_OVERRIDES=(
-    "supervizio/agent=supervizio-runner"
+    "kodflow=kodflow-runner"
+    "supervizio=supervizio-runner"
+    "kitsunium=kitsunium-org-runner"
 )
 ```
 
-An override changes **one line of one job**. The stub is rendered for the
-repository — the gate job takes the label, `block-merge` keeps `ubuntu-latest`
-because it is the job that carries a `pull-requests: write` token — and that
-rendering is what both the drift check and `--apply` use, so a sync can never
-push the hosted runner back onto a repository that was moved off it.
+An entry naming a label no runner carries leaves the required status queued
+forever, which blocks every merge as surely as a red one — check the label
+exists before adding an owner.
+
+An override changes **the `runs-on:` of every job and nothing else**. The stub
+is rendered for the repository — `post-commit` and `block-merge` both take the
+label — and that rendering is what both the drift check and `--apply` use, so a
+sync can never push the hosted runner back onto a repository that was moved off
+it. `block-merge` moves too: its `pull-requests: write` token is scoped to the
+repository it runs in, on a runner that already runs that repository's own CI.
 
 **Only a private repository ever gets one.** Visibility is live state that any
 admin can flip, so it is read on every run rather than inferred from the list.
-A listed repository found public or internal is held to the stub — which runs
+A covered repository found public or internal is held to the stub — which runs
 hosted — so a scheduled `--apply` opens a pull request moving the gate *back*
-off the fleet, the run carries an `::error::` annotation, and the report row
-says `override refused`. If visibility cannot be read, nothing happens at all:
-neither the self-hosted label nor a sync built on a guess. Being listed is
+off the fleet. Covered by its owner's entry, that is simply how a public
+repository is treated; named by its own entry, it is a mistake, so the run
+also carries an `::error::` annotation and the report row says
+`override refused`. If visibility cannot be read, nothing happens at all:
+neither the self-hosted label nor a sync built on a guess. Being covered is
 necessary, never sufficient.
 
 Everything else still has to match, and *match* keeps its full meaning. An
@@ -310,6 +393,8 @@ purge them. Run it one repository at a time, on purpose.
 
 ```
 action.yml                    the action (composite): checkout → resolve → gate
+block-merge/action.yml        the stub's block-merge job: verdict comment + draft (pinned by SHA)
+scripts/bump-block-merge.sh   move that pin in the stub
 scripts/post-commit.sh        the gate
 scripts/patterns.txt          default forbidden patterns (attribution-shaped)
 scripts/patterns-strict.txt   opt-in keyword patterns
