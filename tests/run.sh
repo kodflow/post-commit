@@ -780,7 +780,7 @@ fx="$(efx supervizio/agent private "$ANNOTATED")"; EOUT="$(erun "$fx" supervizio
 grep -q 'stub=present:override ' <<< "$EOUT"; eok "private, listed, annotated: present:override" $?
 grep -qx 'api repos/supervizio/agent --jq .visibility' "$fx/calls.log"; eok "...visibility read on this run, not assumed" $?
 
-fx="$(efx kitsunium/some-repo private "$STUB")"; EOUT="$(erun "$fx" kitsunium/some-repo)"
+fx="$(efx someone-else/some-repo private "$STUB")"; EOUT="$(erun "$fx" someone-else/some-repo)"
 grep -q 'stub=present ' <<< "$EOUT"; eok "not covered, byte-identical: present" $?
 ! grep -qE -- '--jq \.(content|visibility)$' "$fx/calls.log"; eok "...by blob sha alone: no download, no visibility lookup" $?
 
@@ -835,6 +835,41 @@ grep -q 'stub=error:visibility ' <<< "$EOUT"; eok "visibility unreadable: an err
 fx="$(efx supervizio/agent private "$ANNOTATED" content_fails)"; EOUT="$(erun "$fx" --apply supervizio/agent)"
 grep -q 'stub=error:download ' <<< "$EOUT"; eok "deployed file unreadable: an error, not drift" $?
 ! grep -qE -- '-X PUT|^pr create' "$fx/calls.log"; eok "...no write, no pull request" $?
+
+echo "== block-merge pin =="
+# The gate at @main, the token-bearing action at a full SHA — and the script
+# that moves that SHA, driven for real in a throwaway repository.
+bok() {   # bok <name> <rc>
+    if [ "$2" -eq 0 ]; then PASS=$((PASS+1)); printf '  ok   %s\n' "$1"
+    else FAIL=$((FAIL+1)); printf '  FAIL %s\n' "$1"; fi
+}
+n="$(grep -cE '^      - uses: kodflow/post-commit/block-merge@[0-9a-f]{40}  # [0-9]{4}-[0-9]{2}-[0-9]{2}$' "$STUB")"
+bok "the stub pins block-merge to a full SHA, dated" $(( n == 1 ? 0 : 1 ))
+! grep -qE 'block-merge@(main|master|v[0-9])' "$STUB"; bok "...never to a branch or a tag" $?
+grep -qx '      - uses: kodflow/post-commit@main' "$STUB"; bok "the gate stays at @main" $?
+
+b="$(mktemp -d)"; mkdir -p "$b/scripts" "$b/stub" "$b/block-merge"
+cp "$ROOT/scripts/bump-block-merge.sh" "$b/scripts/"; cp "$STUB" "$b/stub/"
+cp "$ROOT/block-merge/action.yml" "$b/block-merge/"
+git -C "$b" init -q; git -C "$b" config user.email t@t; git -C "$b" config user.name t
+git -C "$b" add -A; git -C "$b" commit -qm "chore: one"
+echo "# two" >> "$b/block-merge/action.yml"; git -C "$b" commit -qam "fix: two"
+c2="$(git -C "$b" rev-parse HEAD)"
+echo "# unrelated" >> "$b/scripts/bump-block-merge.sh"; git -C "$b" commit -qam "chore: three"
+REF=HEAD bash "$b/scripts/bump-block-merge.sh" >/dev/null 2>&1; bok "bump runs" $?
+grep -qE "^      - uses: kodflow/post-commit/block-merge@$c2  # " "$b/stub/post-commit.yml"
+bok "...pinning the last commit that touched block-merge/, not the tip" $?
+n="$(diff "$STUB" "$b/stub/post-commit.yml" | grep -c '^[<>]')"
+bok "...changing that line and no other" $(( n == 2 ? 0 : 1 ))
+REF=HEAD bash "$b/scripts/bump-block-merge.sh" --check >/dev/null 2>&1; bok "--check after a bump: current" $?
+git -C "$b" commit -qam "ci: pin"
+echo "# four" >> "$b/block-merge/action.yml"; git -C "$b" commit -qam "fix: four"
+REF=HEAD bash "$b/scripts/bump-block-merge.sh" --check >/dev/null 2>&1; bok "--check once block-merge moved on: behind (rc 1)" $(( $? == 1 ? 0 : 1 ))
+git -C "$b" switch -qc side; echo "# side" >> "$b/block-merge/action.yml"; git -C "$b" commit -qam "fix: side"
+side="$(git -C "$b" rev-parse HEAD)"; git -C "$b" switch -q -
+REF=HEAD bash "$b/scripts/bump-block-merge.sh" "$side" >/dev/null 2>&1; bok "a commit main does not contain is refused (rc 1)" $(( $? == 1 ? 0 : 1 ))
+grep -q "block-merge@$side" "$b/stub/post-commit.yml"; bok "...and not written" $(( $? == 0 ? 1 : 0 ))
+rm -rf "$b"
 
 echo "== usage errors (expect 2) =="
 d=$(mkrepo)

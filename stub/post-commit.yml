@@ -2,9 +2,10 @@
 #
 # No AI attribution anywhere in the history, conventional commit subjects,
 # no credentials added. Every rule — and what happens to a pull request that
-# fails them — lives in kodflow/post-commit and is pinned to @main on purpose:
-# a fix there is live here on the next run with no change to this file. Do
-# not pin a SHA, and do not copy the logic into this repo.
+# fails them — lives in kodflow/post-commit. The gate is pinned to @main on
+# purpose: it holds contents: read only, and a fix there is live here on the
+# next run with no change to this file. Do not pin it, and do not copy the
+# logic into this repo.
 #
 # The job MUST stay named `post-commit`: that is the status the branch
 # ruleset requires, so renaming it or deleting this file leaves the required
@@ -64,6 +65,11 @@ jobs:
   # stay here: a job that does not start is what keeps `pull-requests: write`
   # away from push, manual and fork runs (a fork gets a read-only token anyway,
   # so it is skipped rather than failing on a grant that cannot happen).
+  #
+  # And pinned to a commit, unlike the gate: this is the one job holding a
+  # write token, and @main would hand it to whatever @main becomes. The pin
+  # moves only through kodflow/post-commit's scripts/bump-block-merge.sh and a
+  # reviewed change to the central stub, which enforce.sh then rolls out.
   block-merge:
     needs: post-commit
     if: >-
@@ -76,6 +82,6 @@ jobs:
     permissions:
       pull-requests: write
     steps:
-      - uses: kodflow/post-commit/block-merge@main
+      - uses: kodflow/post-commit/block-merge@db14679a9662f4224ba8d99d189f100733f1da9e  # 2026-09-30
         with:
           report: ${{ needs['post-commit'].outputs.report }}

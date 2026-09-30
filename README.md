@@ -38,7 +38,7 @@ already runs those on GitHub, so `--no-verify` never bypassed them.
 | `report` | the verdict as markdown — the same text the job summary carries, capped at 60 kB |
 
 `report` is what the stub's `block-merge` job hands to
-`kodflow/post-commit/block-merge@main`, which posts it on the pull request. The gate runs in a step
+`kodflow/post-commit/block-merge`, which posts it on the pull request. The gate runs in a step
 that always exits 0 and a separate step carries the verdict, because a
 composite step that fails takes its outputs down with it — and the one job
 that needs the report is the one reacting to a failure.
@@ -169,14 +169,19 @@ jobs:
     permissions:
       pull-requests: write
     steps:
-      - uses: kodflow/post-commit/block-merge@main
+      - uses: kodflow/post-commit/block-merge@<full sha>  # <date>
         with:
           report: ${{ needs['post-commit'].outputs.report }}
 ```
 
 The job **must** be named `post-commit`: that is the status the ruleset
-requires. `@main` is deliberate — pinning a SHA freezes a repo out of every
-future fix. Don't pin it, don't copy the logic in.
+requires. The gate's `@main` is deliberate — it holds `contents: read` and
+nothing else, and pinning a SHA would freeze a repo out of every future fix.
+Don't pin it, don't copy the logic in.
+
+`block-merge` is the opposite case and is **pinned to a full commit SHA**: it
+is the one job holding a `pull-requests: write` token, and `@main` would hand
+that token to whatever `@main` becomes. See *Moving the block-merge pin*.
 
 `block-merge` is the fallback for a failed pull request: it comments the
 verdict (one comment, rewritten in place, saying whether a ruleset actually
@@ -195,6 +200,30 @@ runners only when both belong to the same user or organization: kodflow/post-com
 belongs to `kodflow`, so from `supervizio` or `kitsunium` the gate could not
 run on their runners at all. A composite action has neither limit — it runs
 inside the caller's job, on the caller's runner, under the caller's job name.
+
+### Moving the block-merge pin
+
+A change to `block-merge/action.yml` reaches no repository until the pin moves,
+and the pin moves in one place:
+
+```sh
+git fetch origin
+scripts/bump-block-merge.sh --check   # is the stub pinned to main's latest block-merge commit?
+scripts/bump-block-merge.sh           # rewrite the pin to it, dated
+# commit stub/post-commit.yml, open a PR, merge it
+```
+
+The script pins the last commit on `origin/main` that touched `block-merge/`,
+refuses a commit `main` does not contain (a squashed branch's commit survives
+only as long as some ref keeps it), and changes that one line. Rolling it out
+is then `enforce.sh`'s ordinary job: every deployed stub now differs from the
+central one, so the next enforce run — nightly, or
+`scripts/enforce.sh --apply --all` — opens a sync pull request on every
+repository.
+
+The first pin is the commit that introduced the action. Merge that pull request
+with a **merge commit**, not a squash, so the pinned commit is on `main`; if it
+is squashed, run the script once afterwards.
 
 ### Inputs
 
@@ -257,12 +286,13 @@ and wins over its owner's entry:
 RUNNER_OVERRIDES=(
     "kodflow=kodflow-runner"
     "supervizio=supervizio-runner"
+    "kitsunium=kitsunium-runner"   # placeholder until the label is settled
 )
 ```
 
-`kitsunium` is absent until its runner label exists: an entry naming a label
-no runner carries leaves the required status queued forever, which blocks
-every merge as surely as a red one.
+An entry naming a label no runner carries leaves the required status queued
+forever, which blocks every merge as surely as a red one — so `kitsunium`'s
+placeholder must be replaced before any kitsunium sync is merged.
 
 An override changes **the `runs-on:` of every job and nothing else**. The stub
 is rendered for the repository — `post-commit` and `block-merge` both take the
@@ -363,7 +393,8 @@ purge them. Run it one repository at a time, on purpose.
 
 ```
 action.yml                    the action (composite): checkout → resolve → gate
-block-merge/action.yml        the stub's block-merge job: verdict comment + draft
+block-merge/action.yml        the stub's block-merge job: verdict comment + draft (pinned by SHA)
+scripts/bump-block-merge.sh   move that pin in the stub
 scripts/post-commit.sh        the gate
 scripts/patterns.txt          default forbidden patterns (attribution-shaped)
 scripts/patterns-strict.txt   opt-in keyword patterns

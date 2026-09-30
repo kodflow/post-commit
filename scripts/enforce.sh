@@ -89,12 +89,14 @@ STUB_JOBS=(post-commit block-merge)
 # visibility is an error, not a guess. Being covered is necessary, never
 # sufficient.
 #
-# kitsunium is deliberately absent until its runner label exists: an entry
-# naming a label no runner carries leaves the required status queued forever,
-# which blocks every merge in the org as surely as a red one.
+# An entry naming a label no runner carries leaves the required status queued
+# forever, which blocks every merge in the org as surely as a red one.
 RUNNER_OVERRIDES=(
     "kodflow=kodflow-runner"
     "supervizio=supervizio-runner"
+    # PLACEHOLDER: not a label any runner carries yet. Replace it with the one
+    # the labs change settles on, and merge no kitsunium sync before that.
+    "kitsunium=kitsunium-runner"
 )
 APPLY=false; AUDIT=false; SELFTEST=false; REPORT=""; TARGETS=()
 
