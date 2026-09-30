@@ -49,41 +49,52 @@ RULESET_NAME="post-commit"
 SELF_REPO="kodflow/post-commit"
 GITHUB_ACTIONS_APP_ID=15368
 # The runner the stub asks for. Nothing substitutes ON this value — an
-# override replaces whatever label the gate job carries — but the selftest
-# checks against it that `block-merge` was left alone, so it is written down
-# once rather than spelled out at each use.
+# override replaces whatever label each job carries — but the selftest checks
+# against it that nothing hosted is left behind, so it is written down once
+# rather than spelled out at each use.
 STUB_RUNNER="ubuntu-latest"
+# The jobs whose `runs-on:` an override replaces: all of them. Named, not
+# pattern-matched, so a stub that renames or adds a job fails to render instead
+# of silently leaving a job on the hosted meter.
+STUB_JOBS=(post-commit block-merge)
 
-# Repositories whose gate job legitimately runs somewhere other than the stub's
-# runner, and the label it runs on instead. `owner/repo=label`, one per line.
+# Where a PRIVATE repository runs this workflow instead of the stub's runner.
+# `owner=label` covers every private repository of that owner; `owner/repo=label`
+# names one repository and wins over its owner's entry. One per line.
 #
-# supervizio/agent and supervizio/libprobe are PRIVATE, so every run of this
-# gate — every pull-request commit, every push to the trunk, every manual check
-# — bills GitHub-hosted minutes, rounded UP to a whole minute per job, for a
-# composite action that is actions/checkout plus bash. At the observed merge
-# rate that is on the order of 560 billable minutes a month across the two, and
-# it is what exhausted libprobe's allowance four times. The same run on the
-# self-hosted ARC pool costs nothing and lands some 15-25s slower — measured at
-# 26s on agent and 36s on libprobe against 9-18s hosted.
+# A private repository bills GitHub-hosted minutes for every run of this gate —
+# every pull-request commit, every push to the trunk, every manual check —
+# rounded UP to a whole minute per job, for a composite action that is
+# actions/checkout plus bash. That exhausted supervizio/libprobe's allowance four
+# times. The same run on the self-hosted ARC pool costs nothing and lands some
+# 15-25s slower — measured at 26s on agent and 36s on libprobe against 9-18s
+# hosted. Both jobs move: block-merge carries a `pull-requests: write` token,
+# but only for the repository it runs in, on a runner that already runs that
+# repository's own CI with its own secrets.
 #
-# supervizio/runner-template is deliberately NOT here and must not be added: it
-# is PUBLIC, its hosted minutes are free, and pointing a public repository's
-# pull requests at a self-hosted runner would let an untrusted fork run code on
-# the fleet. That asymmetry is the whole reason this is per-repository and not
-# an edit to the stub — a stub change would be actively wrong for that repo.
+# A PUBLIC repository is never moved, owner entry or not: its hosted minutes are
+# free, and pointing its pull requests at a self-hosted runner would let an
+# untrusted fork run code on the fleet. supervizio/runner-template is the case
+# in point. That asymmetry is why this is decided per repository at render time
+# and not by editing the stub — a stub change would be actively wrong there.
 #
-# An override relaxes exactly one line of exactly one job. Everything else in
-# the deployed file is still required to match the stub, so a repository listed
-# here is NOT exempt from the next stub change; see stub_covered_by.
+# An override relaxes the `runs-on:` of each job and nothing else. Everything
+# else in the deployed file is still required to match the stub, so a repository
+# covered here is NOT exempt from the next stub change; see stub_covered_by.
 #
 # And it only ever applies to a repository that is PRIVATE when the run looks.
 # Visibility is not a property of this list — anyone with admin can flip it — so
-# it is read on every run, and a listed repository found public (or internal, or
-# unreadable) never gets the label: it is held to the stub, which runs hosted.
-# Being listed here is necessary, never sufficient.
+# it is read on every run, and a covered repository found public (or internal)
+# never gets the label: it is held to the stub, which runs hosted. Unreadable
+# visibility is an error, not a guess. Being covered is necessary, never
+# sufficient.
+#
+# kitsunium is deliberately absent until its runner label exists: an entry
+# naming a label no runner carries leaves the required status queued forever,
+# which blocks every merge in the org as surely as a red one.
 RUNNER_OVERRIDES=(
-    "supervizio/agent=supervizio-runner"
-    "supervizio/libprobe=supervizio-runner"
+    "kodflow=kodflow-runner"
+    "supervizio=supervizio-runner"
 )
 APPLY=false; AUDIT=false; SELFTEST=false; REPORT=""; TARGETS=()
 
@@ -132,14 +143,14 @@ OVERRIDE_NOTE='
 
 ### This repository carries a runner override
 
-The `runs-on:` of the gate job is not the stub value. That is deliberate and
+The `runs-on:` of each job is not the stub value. That is deliberate and
 central — it lives in `RUNNER_OVERRIDES` in
 [scripts/enforce.sh](https://github.com/kodflow/post-commit/blob/main/scripts/enforce.sh),
 which is also where the reason is written down — and this pull request keeps it.
 What it does not keep is any comment added to the file inside this repository:
 the sync writes the central copy, annotated only by the override.'
 # Appended when a listed repository is not private. The sync then writes the
-# stub unmodified, which moves the gate job back to a hosted runner, and the
+# stub unmodified, which moves both jobs back to a hosted runner, and the
 # reader deserves to know that is the point rather than a side effect.
 REFUSED_NOTE='
 
@@ -167,35 +178,43 @@ ruleset_payload() {
         ]}'
 }
 
+# Prints the label and says where it came from: rc 0 for an entry naming the
+# repository, 3 for its owner's entry, 1 for none. The difference matters on a
+# public repository: an owner entry simply does not apply there, while an entry
+# naming a public repository is a mistake someone has to hear about.
 runner_override() {   # runner_override <owner/repo> -> the label, or nothing
-    local repo="$1" entry
+    local repo="$1" entry label=""
     # `set -u` and an empty array are not friends on every bash this runs on,
-    # and an empty list is a realistic end state — the day both repositories
-    # come back to the stub, this file should need one deletion, not two.
+    # and an empty list is a realistic end state — the day the fleet comes back
+    # to the stub, this file should need one deletion, not two.
     [ "${#RUNNER_OVERRIDES[@]}" -gt 0 ] || return 1
     for entry in "${RUNNER_OVERRIDES[@]}"; do
         [ "${entry%%=*}" = "$repo" ] && { printf '%s' "${entry#*=}"; return 0; }
+        [ "${entry%%=*}" = "${repo%%/*}" ] && label="${entry#*=}"
     done
+    [ -n "$label" ] && { printf '%s' "$label"; return 3; }
     return 1
 }
 
-# The stub carries two `runs-on:` lines and they are not interchangeable. The
-# gate job is the one that runs on every pull-request commit, so it is the one
-# whose minutes matter; `block-merge` holds a `pull-requests: write` token,
-# runs only after a failure, and stays hosted on purpose. Matching the job by
-# name rather than by position is what keeps an override from ever landing on
-# the wrong one — and if the stub renames the job, nothing is substituted and
-# this reports an error instead of silently rendering the stub unchanged.
-render_stub() {   # render_stub <stub> <label> <job> <outfile>
-    awk -v label="$2" -v job="$3" '
-        # Re-evaluated at EVERY job key, not just ours. Latched on, a gate job
-        # that lost its runs-on line would hand the override to the next job
-        # down — which is block-merge, the one holding the write token.
-        $0 ~ /^  [A-Za-z0-9_.-]+:[[:space:]]*$/ { injob = ($0 ~ "^  " job ":[[:space:]]*$") }
-        injob && !hit && $0 ~ /^    runs-on:/ { print "    runs-on: " label; hit = 1; next }
+# Each named job gets the label on its own `runs-on:` line, exactly once.
+# Matching the job by name rather than by position is what keeps an override
+# from landing where it was not asked for — and if the stub renames a job or
+# one loses its runs-on line, that job is not substituted and this reports an
+# error instead of silently rendering a half-hosted stub.
+render_stub() {   # render_stub <stub> <label> <outfile> <job>...
+    local stub="$1" label="$2" out="$3"; shift 3
+    awk -v label="$label" -v jobs="$*" '
+        BEGIN { n = split(jobs, j, " "); for (k = 1; k <= n; k++) want[j[k]] = 1 }
+        # Re-evaluated at EVERY job key, not just ours. Latched on, a job that
+        # lost its runs-on line would hand the override to the next job down.
+        $0 ~ /^  [A-Za-z0-9_.-]+:[[:space:]]*$/ {
+            cur = $0; sub(/^  /, "", cur); sub(/:[[:space:]]*$/, "", cur)
+            injob = (cur in want)
+        }
+        injob && !(cur in hit) && $0 ~ /^    runs-on:/ { print "    runs-on: " label; hit[cur] = 1; next }
         { print }
-        END { exit(hit ? 0 : 1) }
-    ' "$1" > "$4"
+        END { for (k in want) if (!(k in hit)) exit 1; exit 0 }
+    ' "$stub" > "$out"
 }
 
 # Is the deployed file an acceptable rendering of the stub?
@@ -291,31 +310,35 @@ ensure_stub() {   # -> sets STUB_STATE, PR_URL, STUB_NOTE
     # was only ever checked for existence, so every later change to it (the
     # identity input, the pull-request comment) sat undeployed on a fleet that
     # reported itself complete.
-    # A repository listed in RUNNER_OVERRIDES is compared against the stub as
+    # A repository covered by RUNNER_OVERRIDES is compared against the stub as
     # rendered for it, and that rendered copy is also what a sync would write —
     # so --apply can never push the stub's runner back onto a private repo and
     # quietly restart the meter it was moved off.
-    local label="" want_blob="$STUB_BLOB" want_b64="$STUB_B64" want_file="$STUB_FILE" vis
-    if label="$(runner_override "$repo")"; then
-        # Listed is not enough: the override is for a PRIVATE repository, and
+    local label="" want_blob="$STUB_BLOB" want_b64="$STUB_B64" want_file="$STUB_FILE" vis scope
+    label="$(runner_override "$repo")"; scope=$?
+    if [ "$scope" -ne 1 ]; then
+        # Covered is not enough: the override is for a PRIVATE repository, and
         # visibility is live state, so it is read now rather than assumed from
         # the list. Anything else fails closed. Public or internal: the label is
         # refused and the repository is held to the stub, which runs hosted, so
-        # a sync repairs it instead of blessing it. Unreadable: nothing at all —
-        # neither the self-hosted label nor a sync built on a guess.
+        # a sync repairs it instead of blessing it — silently when it was only
+        # its owner's entry, loudly when an entry names it. Unreadable: nothing
+        # at all — neither the self-hosted label nor a sync built on a guess.
         vis="$(gh api "repos/$repo" --jq .visibility 2>/dev/null)"
         case "$vis" in
             private) ;;
             public|internal)
-                STUB_NOTE="override refused: $vis"
-                echo "::error::$repo is $vis but listed in RUNNER_OVERRIDES. A self-hosted gate on a $vis repository runs other people's pull requests on the fleet, so the override is refused and the repository is held to the stub (hosted). Remove the entry." >&2
+                if [ "$scope" -eq 0 ]; then
+                    STUB_NOTE="override refused: $vis"
+                    echo "::error::$repo is $vis but listed in RUNNER_OVERRIDES. A self-hosted gate on a $vis repository runs other people's pull requests on the fleet, so the override is refused and the repository is held to the stub (hosted). Remove the entry." >&2
+                fi
                 label="" ;;
             *) STUB_STATE="error:visibility"; return ;;
         esac
     fi
     if [ -n "$label" ]; then
         want_file="$WORKDIR/rendered.yml"
-        render_stub "$STUB_FILE" "$label" post-commit "$want_file" \
+        render_stub "$STUB_FILE" "$label" "$want_file" "${STUB_JOBS[@]}" \
             || { STUB_STATE="error:render"; return; }
         want_blob="$(git hash-object "$want_file")"
         want_b64="$(base64 -w0 < "$want_file")"
@@ -423,29 +446,49 @@ if $SELFTEST; then
     }
 
     echo "== overrides =="
-    # The public repository of this fleet, named so that listing it is a red
-    # test and not a quiet edit. The live guard is the visibility check in
-    # ensure_stub, which refuses any repository that is not private; this is the
-    # tripwire in front of it.
+    # The public repository of this fleet, named so that an entry for it is a red
+    # test and not a quiet edit. Its owner's entry may cover it — the live guard
+    # is the visibility check in ensure_stub, which refuses any repository that
+    # is not private — but an entry naming it is the one that would be wrong.
     runner_override supervizio/runner-template >/dev/null
-    t "supervizio/runner-template has no override" 1 $?
+    rc=$?; if [ "$rc" -ne 0 ]; then rc=0; else rc=1; fi
+    t "supervizio/runner-template is named by no entry" 0 "$rc"
+    # A repository entry wins over its owner's, and an owner entry does not
+    # leak onto an owner whose name merely starts the same.
+    RUNNER_OVERRIDES_SAVED=(${RUNNER_OVERRIDES[@]+"${RUNNER_OVERRIDES[@]}"})
+    RUNNER_OVERRIDES=("acme=owner-label" "acme/special=repo-label")
+    if [ "$(runner_override acme/special)" = repo-label ]; then rc=0; else rc=1; fi
+    t "a repository entry wins over its owner's" 0 "$rc"
+    runner_override acme/special >/dev/null; t "...and says it named the repository" 0 $?
+    if [ "$(runner_override acme/other)" = owner-label ]; then rc=0; else rc=1; fi
+    t "an owner entry covers the owner's other repositories" 0 "$rc"
+    runner_override acme/other >/dev/null; t "...and says it came from the owner" 3 $?
+    runner_override acmecorp/x >/dev/null; t "an owner entry does not cover a longer owner name" 1 $?
+    runner_override other/acme >/dev/null; t "an owner entry does not match a repository name" 1 $?
+    RUNNER_OVERRIDES=(${RUNNER_OVERRIDES_SAVED[@]+"${RUNNER_OVERRIDES_SAVED[@]}"})
     # Guarded like runner_override: bash before 4.4 calls an empty array unbound
     # under `set -u`, and an empty list is the end state this must survive.
     for entry in ${RUNNER_OVERRIDES[@]+"${RUNNER_OVERRIDES[@]}"}; do
         # Non-empty, not just found: `owner/repo=` would render `runs-on:` with
         # nothing after it, and that file does not load at all.
-        if [ -n "$(runner_override "${entry%%=*}")" ]; then rc=0; else rc=1; fi
+        k="${entry%%=*}"; [ "$k" = "${k#*/}" ] && k="$k/any-repository"
+        if [ -n "$(runner_override "$k")" ]; then rc=0; else rc=1; fi
         t "${entry%%=*} resolves to a non-empty label" 0 "$rc"
     done
 
     echo "== render =="
-    render_stub "$STUB_FILE" self-hosted-x post-commit "$R"
-    t "the gate job's runs-on is substituted" 0 $?
-    grep -qx "    runs-on: self-hosted-x" "$R"; t "...to the override label" 0 $?
-    grep -qx "    runs-on: $STUB_RUNNER" "$R"; t "block-merge keeps the stub runner" 0 $?
-    [ "$(grep -c '^    runs-on:' "$R")" -eq "$(grep -c '^    runs-on:' "$STUB_FILE")" ]
-    t "no runs-on line is added or lost" 0 $?
-    render_stub "$STUB_FILE" self-hosted-x no-such-job "$WORKDIR/x.yml"
+    render_stub "$STUB_FILE" self-hosted-x "$R" "${STUB_JOBS[@]}"
+    t "every job's runs-on is substituted" 0 $?
+    if [ "$(grep -cx '    runs-on: self-hosted-x' "$R")" -eq "${#STUB_JOBS[@]}" ]; then rc=0; else rc=1; fi
+    t "...to the override label, once per job" 0 "$rc"
+    ! grep -q "runs-on: $STUB_RUNNER" "$R"; t "nothing is left on the hosted runner" 0 $?
+    if [ "$(grep -c '^    runs-on:' "$R")" -eq "$(grep -c '^    runs-on:' "$STUB_FILE")" ]; then rc=0; else rc=1; fi
+    t "no runs-on line is added or lost" 0 "$rc"
+    # Every job the stub has is named in STUB_JOBS: a job added to the stub and
+    # not here would stay hosted on every private repository without a word.
+    if [ "$(sed -n '/^jobs:/,$p' "$STUB_FILE" | grep -cE '^  [A-Za-z0-9_.-]+:[[:space:]]*$')" -eq "${#STUB_JOBS[@]}" ]; then rc=0; else rc=1; fi
+    t "STUB_JOBS names every job of the stub" 0 "$rc"
+    render_stub "$STUB_FILE" self-hosted-x "$WORKDIR/x.yml" post-commit no-such-job
     t "a job the stub does not have is an error, not a silent no-op" 1 $?
     # The override must never be able to walk downhill into the next job. Only
     # the GATE job loses its runner here: block-merge keeps its own, because a
@@ -460,7 +503,7 @@ if $SELFTEST; then
     ' "$STUB_FILE" > "$WORKDIR/noruns.yml"
     grep -qx "    runs-on: $STUB_RUNNER" "$WORKDIR/noruns.yml"
     t "the fixture leaves block-merge a runner to wrongly take" 0 $?
-    render_stub "$WORKDIR/noruns.yml" self-hosted-x post-commit "$WORKDIR/x.yml"
+    render_stub "$WORKDIR/noruns.yml" self-hosted-x "$WORKDIR/x.yml" post-commit
     t "a gate job with no runs-on does not hand the label to the next job" 1 $?
     ! grep -q 'runs-on: self-hosted-x' "$WORKDIR/x.yml"
     t "...and block-merge is not relabelled" 0 $?
@@ -472,12 +515,12 @@ if $SELFTEST; then
     t "comments and blanks added on top" 0 $?
     # Exactly where agent and libprobe annotate: after block-merge's folded if:,
     # at the job's own depth, which ends the scalar before the comment starts.
-    covered '/^    runs-on: ubuntu-latest$/ { print "    # stays hosted, on purpose" } { print }'
+    covered '/^    runs-on: / && ++n == 2 { print "    # self-hosted, like the gate" } { print }'
     t "a comment after the if: scalar, at the depth of its key" 0 $?
-    covered '/^    runs-on: ubuntu-latest$/ { print "" } { print }'
+    covered '/^    runs-on: / && ++n == 2 { print "" } { print }'
     t "a blank line after a scalar that does not keep them" 0 $?
-    covered '/^      - env:$/ { print "      # about the next step" } { print }'
-    t "a comment between two steps, after a run: script" 0 $?
+    covered '/^  block-merge:$/ { print "  # about the next job" } { print }'
+    t "a comment between two jobs" 0 $?
 
     echo "== refused =="
     # The point of the whole design: an overridden repository is still held to
@@ -490,10 +533,10 @@ if $SELFTEST; then
     t "an executable line added" 1 $?
     tac "$R" > "$D" 2>/dev/null || tail -r "$R" > "$D"
     stub_covered_by "$R" "$D"; t "the same lines in another order" 1 $?
-    # An override relaxes one line of one job, not the label everywhere: the
-    # token-bearing block-merge job must not be able to follow it off-hosted.
-    render_stub "$STUB_FILE" self-hosted-x block-merge "$D"
-    stub_covered_by "$R" "$D"; t "block-merge moved to the override label" 1 $?
+    # An override moves the whole workflow, not half of it: a repository whose
+    # block-merge stayed hosted is still paying for minutes it was moved off.
+    render_stub "$STUB_FILE" self-hosted-x "$D" post-commit
+    stub_covered_by "$R" "$D"; t "block-merge left on the hosted runner" 1 $?
     # And it is not a blanket pass for the repository either: the file that has
     # not taken the override is as much drift as any other mismatch.
     stub_covered_by "$R" "$STUB_FILE"; t "the unrendered stub against an override" 1 $?
@@ -503,11 +546,7 @@ if $SELFTEST; then
     t "a comment inside block-merge's folded if:" 1 $?
     covered '{ print } /^      \$\{\{ failure\(\)$/ { print "" }'
     t "a blank line inside block-merge's folded if:" 1 $?
-    covered '{ print } /^          MARKER=/ { print "          # inside the script" }'
-    t "a comment inside a run: script" 1 $?
-    covered '{ print } /--paginate \\$/ { print "                # after a line continuation" }'
-    t "a comment after a line continuation in a run: script" 1 $?
-    covered '/^    runs-on: ubuntu-latest$/ { print "          # deeper than the if: key" } { print }'
+    covered '/^    runs-on: / && ++n == 2 { print "          # deeper than the if: key" } { print }'
     t "a comment after a scalar, deep enough to continue it" 1 $?
     covered '/^  post-commit:$/ { print; print "\t# tab-indented"; next } { print }'
     t "a tab-indented comment" 1 $?
