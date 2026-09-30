@@ -94,9 +94,7 @@ STUB_JOBS=(post-commit block-merge)
 RUNNER_OVERRIDES=(
     "kodflow=kodflow-runner"
     "supervizio=supervizio-runner"
-    # PLACEHOLDER: not a label any runner carries yet. Replace it with the one
-    # the labs change settles on, and merge no kitsunium sync before that.
-    "kitsunium=kitsunium-runner"
+    "kitsunium=kitsunium-org-runner"
 )
 APPLY=false; AUDIT=false; SELFTEST=false; REPORT=""; TARGETS=()
 

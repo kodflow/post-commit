@@ -286,13 +286,13 @@ and wins over its owner's entry:
 RUNNER_OVERRIDES=(
     "kodflow=kodflow-runner"
     "supervizio=supervizio-runner"
-    "kitsunium=kitsunium-runner"   # placeholder until the label is settled
+    "kitsunium=kitsunium-org-runner"
 )
 ```
 
 An entry naming a label no runner carries leaves the required status queued
-forever, which blocks every merge as surely as a red one — so `kitsunium`'s
-placeholder must be replaced before any kitsunium sync is merged.
+forever, which blocks every merge as surely as a red one — check the label
+exists before adding an owner.
 
 An override changes **the `runs-on:` of every job and nothing else**. The stub
 is rendered for the repository — `post-commit` and `block-merge` both take the
