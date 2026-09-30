@@ -836,6 +836,26 @@ fx="$(efx supervizio/agent private "$ANNOTATED" content_fails)"; EOUT="$(erun "$
 grep -q 'stub=error:download ' <<< "$EOUT"; eok "deployed file unreadable: an error, not drift" $?
 ! grep -qE -- '-X PUT|^pr create' "$fx/calls.log"; eok "...no write, no pull request" $?
 
+# An App installation token reaches one owner's repositories and nothing else,
+# so the workflow hands over one per owner. Each repository must be served with
+# its own owner's token, and --all must list through the installations, since
+# /user answers no installation token.
+fx="$(efx kodflow/a private "$STUB")"; mkdir -p "$fx/supervizio/b"
+printf private > "$fx/supervizio/b/visibility"; cp "$STUB" "$fx/supervizio/b/workflow.yml"
+printf '%s' '{"repositories":[{"full_name":"kodflow/a","archived":false,"fork":false},{"full_name":"kodflow/old","archived":true,"fork":false}]}' > "$fx/installation.tk-kodflow"
+printf '%s' '{"repositories":[{"full_name":"supervizio/b","archived":false,"fork":false},{"full_name":"supervizio/f","archived":false,"fork":true}]}' > "$fx/installation.tk-supervizio"
+EOUT="$(FLEET_OWNERS="kodflow supervizio" FLEET_TOKEN_KODFLOW=tk-kodflow FLEET_TOKEN_SUPERVIZIO=tk-supervizio erun "$fx" --all)"
+grep -q '^kodflow/a ' <<< "$EOUT" && grep -q '^supervizio/b ' <<< "$EOUT"; eok "per-owner tokens, --all: every owner's installation listed" $?
+! grep -qE '^(kodflow/old|supervizio/f) ' <<< "$EOUT"; eok "...archived and forked repositories left out" $?
+! grep -qE '^api user' "$fx/calls.log"; eok "...without /user, which refuses an installation token" $?
+grep -q '^tk-kodflow .*repos/kodflow/a' "$fx/tokens.log" && grep -q '^tk-supervizio .*repos/supervizio/b' "$fx/tokens.log"
+eok "...each repository served with its owner's token" $?
+! grep -qE '^tk-kodflow .*supervizio/|^tk-supervizio .*kodflow/' "$fx/tokens.log"; eok "...and never with another owner's" $?
+fx="$(efx supervizio/b private "$STUB")"
+EOUT="$(FLEET_OWNERS="kodflow" FLEET_TOKEN_KODFLOW=tk-kodflow erun "$fx" --apply supervizio/b)"
+grep -q 'no token for its owner' <<< "$EOUT"; eok "an owner without a token: an error row" $?
+! grep -qs 'supervizio/b' "$fx/calls.log"; eok "...and no call at all, not one with the wrong token" $?
+
 echo "== block-merge pin =="
 # The gate at @main, the token-bearing action at a full SHA — and the script
 # that moves that SHA, driven for real in a throwaway repository.

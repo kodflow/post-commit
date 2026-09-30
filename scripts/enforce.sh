@@ -96,6 +96,21 @@ RUNNER_OVERRIDES=(
     "supervizio=supervizio-runner"
     "kitsunium=kitsunium-org-runner"
 )
+# One token per owner. A GitHub App installation token reaches the
+# repositories of ONE account — an installation is per owner — so the enforce
+# workflow mints one per owner, hands each over as FLEET_TOKEN_<OWNER> (upper
+# case, `-` as `_`) and lists the owners in FLEET_OWNERS. Every gh call for a
+# repository then goes out with its owner's token. With FLEET_OWNERS unset — a
+# run from a laptop — gh's own login answers everything, as it always did.
+read -ra FLEET_OWNERS <<< "${FLEET_OWNERS:-}"
+use_owner_token() {   # use_owner_token <owner[/repo]>: export GH_TOKEN for that owner
+    [ "${#FLEET_OWNERS[@]}" -gt 0 ] || return 0
+    local owner="${1%%/*}" var
+    var="FLEET_TOKEN_$(printf '%s' "$owner" | tr '[:lower:]-' '[:upper:]_')"
+    [ -n "${!var:-}" ] || { echo "::error::no $var for $owner (FLEET_OWNERS: ${FLEET_OWNERS[*]})" >&2; return 1; }
+    export GH_TOKEN="${!var}"
+}
+
 APPLY=false; AUDIT=false; SELFTEST=false; REPORT=""; TARGETS=()
 
 while [ $# -gt 0 ]; do
@@ -105,6 +120,18 @@ while [ $# -gt 0 ]; do
         --selftest) SELFTEST=true ;;
         --report) REPORT="$2"; shift ;;
         --all)
+            # An installation token belongs to no user: /user and /user/orgs
+            # refuse it. It lists what its installation reaches instead, which
+            # is exactly one owner's repositories.
+            if [ "${#FLEET_OWNERS[@]}" -gt 0 ]; then
+                for o in "${FLEET_OWNERS[@]}"; do
+                    use_owner_token "$o" || exit 2
+                    while IFS= read -r r; do TARGETS+=("$r"); done < <(
+                        gh api --paginate installation/repositories \
+                            --jq '.repositories[] | select(.archived==false and .fork==false) | .full_name')
+                done
+                shift; continue
+            fi
             OWNER="$(gh api user --jq .login)"
             mapfile -t ORGS < <(gh api user/orgs --jq '.[].login')
             for o in "$OWNER" "${ORGS[@]}"; do
@@ -630,6 +657,7 @@ if $AUDIT; then
     printf '%-40s %-8s %-10s %-12s %s\n' REPOSITORY VISIBLE WORKFLOW REQUIRED BYPASS
     ok=0; advisory=0; total=0
     for repo in "${TARGETS[@]}"; do
+        use_owner_token "$repo" || { printf '%-40s %-8s %-10s %-12s %s\n' "$repo" - no-token - -; continue; }
         db="$(gh repo view "$repo" --json defaultBranchRef --jq '.defaultBranchRef.name // empty' 2>/dev/null)"
         # An empty repository is listed but not counted: there is no history to
         # gate and no default branch to attach a ruleset to, so scoring it as a
@@ -674,6 +702,9 @@ fi
 
 ROWS=()
 for repo in "${TARGETS[@]}"; do
+    if ! use_owner_token "$repo"; then
+        ROWS+=("$repo"$'\t'"-"$'\t'"error:no-token"$'\t'"-"$'\t'""); echo "$repo: no token for its owner"; continue
+    fi
     db="$(gh repo view "$repo" --json defaultBranchRef --jq '.defaultBranchRef.name // empty' 2>/dev/null)"
     if [ -z "$db" ]; then ROWS+=("$repo"$'\t'"-"$'\t'"skip:empty"$'\t'"-"$'\t'""); echo "$repo: empty, skipped"; continue; fi
     ensure_stub "$repo" "$db"

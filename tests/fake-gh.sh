@@ -14,11 +14,16 @@
 #   content_fails   present: downloading that file's content fails
 #   open_pr         a URL: an open pull request exists on the enforce branch
 #
-# For the test to inspect afterwards: put.b64 (the content of a contents PUT)
-# and pr.body (the body of a pull request it was asked to create).
+#   installation.<token>   the answer to installation/repositories for a
+#                          request made with GH_TOKEN=<token>; absent: 401
+#
+# For the test to inspect afterwards: put.b64 (the content of a contents PUT),
+# pr.body (the body of a pull request it was asked to create) and tokens.log
+# (every invocation again, prefixed with the GH_TOKEN it carried).
 set -uo pipefail
 D="${FAKE_GH_DIR:?FAKE_GH_DIR is not set}"
 printf '%s\n' "$*" >> "$D/calls.log"
+printf '%s %s\n' "${GH_TOKEN:--}" "$*" >> "$D/tokens.log"
 
 die() { printf 'fake-gh: %s\n' "$*" >&2; exit "${RC:-1}"; }
 unknown() { RC=97 die "unmocked call: gh $ARGS"; }
@@ -67,6 +72,10 @@ case "$sub" in
             *) unknown ;;
         esac ;;
     api)
+        if [ "$endpoint" = installation/repositories ]; then
+            [ -s "$D/installation.${GH_TOKEN:-}" ] || die "HTTP 401 (no installation for this token)"
+            out "$(cat "$D/installation.$GH_TOKEN")"; exit 0
+        fi
         path="${endpoint%%\?*}"; query=""
         case "$endpoint" in *\?*) query="${endpoint#*\?}" ;; esac
         rest="${path#repos/}"; owner="${rest%%/*}"; rest="${rest#*/}"
