@@ -1,6 +1,15 @@
-# Fleet enforcement from GitHub itself. Needs a FLEET_TOKEN secret: a PAT with
-# `repo` + `workflow` scopes belonging to an admin of every target — the
-# default GITHUB_TOKEN cannot touch other repositories.
+# Fleet enforcement from GitHub itself, authenticated as the GitHub App
+# kodflow-ci — the default GITHUB_TOKEN cannot touch other repositories. Needs
+# the variable CI_APP_CLIENT_ID and the secret CI_APP_PRIVATE_KEY on this
+# repository, and the app installed on every owner below.
+#
+# An installation token reaches ONE owner's repositories, so one is minted per
+# owner and handed to enforce.sh as FLEET_TOKEN_<OWNER>; FLEET_OWNERS is the
+# list, and adding an owner means a step here and a word there. Each token
+# covers all of its owner's repositories (enforce.sh visits them all) with
+# only what enforce.sh does: contents + workflows to write the stub (a file
+# under .github/workflows), pull-requests to open the sync, administration to
+# read and write the rulesets. Tokens last an hour, well over a run.
 name: enforce
 
 on:
@@ -27,18 +36,63 @@ permissions:
 jobs:
   enforce:
     runs-on: ubuntu-latest
+    env:
+      FLEET_OWNERS: kodflow kodmain kitsunium supervizio
     steps:
       - uses: actions/checkout@v7
+      - name: token for kodflow
+        id: token-kodflow
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.CI_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          owner: kodflow
+          permission-administration: write
+          permission-contents: write
+          permission-pull-requests: write
+          permission-workflows: write
+      - name: token for kodmain
+        id: token-kodmain
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.CI_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          owner: kodmain
+          permission-administration: write
+          permission-contents: write
+          permission-pull-requests: write
+          permission-workflows: write
+      - name: token for kitsunium
+        id: token-kitsunium
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.CI_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          owner: kitsunium
+          permission-administration: write
+          permission-contents: write
+          permission-pull-requests: write
+          permission-workflows: write
+      - name: token for supervizio
+        id: token-supervizio
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.CI_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          owner: supervizio
+          permission-administration: write
+          permission-contents: write
+          permission-pull-requests: write
+          permission-workflows: write
       - name: enforce
         env:
-          GH_TOKEN: ${{ secrets.FLEET_TOKEN }}
+          FLEET_TOKEN_KODFLOW: ${{ steps.token-kodflow.outputs.token }}
+          FLEET_TOKEN_KODMAIN: ${{ steps.token-kodmain.outputs.token }}
+          FLEET_TOKEN_KITSUNIUM: ${{ steps.token-kitsunium.outputs.token }}
+          FLEET_TOKEN_SUPERVIZIO: ${{ steps.token-supervizio.outputs.token }}
           TARGETS: ${{ inputs.targets || '--all' }}
           APPLY: ${{ github.event_name == 'schedule' && 'true' || inputs.apply }}
         run: |
-          if [ -z "$GH_TOKEN" ]; then
-            echo "::error::FLEET_TOKEN secret is not set (PAT with repo + workflow scopes, admin on targets)"
-            exit 1
-          fi
           # shellcheck disable=SC2086 — TARGETS is a deliberate word list
           bash scripts/enforce.sh $([ "$APPLY" = "true" ] && echo --apply) --report "$GITHUB_STEP_SUMMARY" $TARGETS
 
@@ -49,7 +103,10 @@ jobs:
       - name: audit
         if: always()
         env:
-          GH_TOKEN: ${{ secrets.FLEET_TOKEN }}
+          FLEET_TOKEN_KODFLOW: ${{ steps.token-kodflow.outputs.token }}
+          FLEET_TOKEN_KODMAIN: ${{ steps.token-kodmain.outputs.token }}
+          FLEET_TOKEN_KITSUNIUM: ${{ steps.token-kitsunium.outputs.token }}
+          FLEET_TOKEN_SUPERVIZIO: ${{ steps.token-supervizio.outputs.token }}
           TARGETS: ${{ inputs.targets || '--all' }}
         run: |
           {

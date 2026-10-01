@@ -96,6 +96,27 @@ RUNNER_OVERRIDES=(
     "supervizio=supervizio-runner"
     "kitsunium=kitsunium-org-runner"
 )
+# One token per owner. A GitHub App installation token reaches the
+# repositories of ONE account — an installation is per owner — so the enforce
+# workflow mints one per owner, hands each over as FLEET_TOKEN_<OWNER> (upper
+# case, `-` as `_`) and lists the owners in FLEET_OWNERS. Every gh call for a
+# repository then goes out with its owner's token. With FLEET_OWNERS unset — a
+# run from a laptop — gh's own login answers everything, as it always did.
+read -ra FLEET_OWNERS <<< "${FLEET_OWNERS:-}"
+use_owner_token() {   # use_owner_token <owner[/repo]>: export GH_TOKEN for that owner
+    [ "${#FLEET_OWNERS[@]}" -gt 0 ] || return 0
+    local owner="${1%%/*}" var
+    var="FLEET_TOKEN_$(printf '%s' "$owner" | tr '[:lower:]-' '[:upper:]_')"
+    [ -n "${!var:-}" ] || { echo "::error::no $var for $owner (FLEET_OWNERS: ${FLEET_OWNERS[*]})" >&2; return 1; }
+    export GH_TOKEN="${!var}"
+}
+
+# What this run could not even look at: an owner whose installation would not
+# list its repositories, a repository whose owner has no token. Each is
+# reported where it happens and makes the run exit 1 at the end — a run that
+# skipped part of the fleet must not read as a clean pass.
+FLEET_ERRORS=()
+
 APPLY=false; AUDIT=false; SELFTEST=false; REPORT=""; TARGETS=()
 
 while [ $# -gt 0 ]; do
@@ -105,6 +126,25 @@ while [ $# -gt 0 ]; do
         --selftest) SELFTEST=true ;;
         --report) REPORT="$2"; shift ;;
         --all)
+            # An installation token belongs to no user: /user and /user/orgs
+            # refuse it. It lists what its installation reaches instead, which
+            # is exactly one owner's repositories.
+            if [ "${#FLEET_OWNERS[@]}" -gt 0 ]; then
+                for o in "${FLEET_OWNERS[@]}"; do
+                    use_owner_token "$o" || exit 2
+                    # Captured, not read from a process substitution: there a
+                    # failed listing (401, 403, a 5xx) is an empty list, and
+                    # the owner would be skipped without a word.
+                    if ! listing="$(gh api --paginate installation/repositories \
+                            --jq '.repositories[] | select(.archived==false and .fork==false) | .full_name')"; then
+                        echo "::error::cannot list the repositories of the $o installation" >&2
+                        FLEET_ERRORS+=("$o: installation repositories unreadable")
+                        continue
+                    fi
+                    while IFS= read -r r; do [ -n "$r" ] && TARGETS+=("$r"); done <<< "$listing"
+                done
+                shift; continue
+            fi
             OWNER="$(gh api user --jq .login)"
             mapfile -t ORGS < <(gh api user/orgs --jq '.[].login')
             for o in "$OWNER" "${ORGS[@]}"; do
@@ -117,7 +157,7 @@ while [ $# -gt 0 ]; do
     esac
     shift
 done
-$SELFTEST || [ "${#TARGETS[@]}" -gt 0 ] || { echo "usage: enforce.sh [--apply] [--audit] [--report FILE] (--all | owner/repo ...)" >&2; exit 2; }
+$SELFTEST || [ "${#TARGETS[@]}" -gt 0 ] || [ "${#FLEET_ERRORS[@]}" -gt 0 ] || { echo "usage: enforce.sh [--apply] [--audit] [--report FILE] (--all | owner/repo ...)" >&2; exit 2; }
 [ -r "$STUB_FILE" ] || { echo "stub not found: $STUB_FILE" >&2; exit 2; }
 STUB_B64="$(base64 -w0 < "$STUB_FILE")"
 STUB_BLOB="$(git hash-object "$STUB_FILE")"
@@ -620,6 +660,14 @@ PY
     [ "$t_fail" -eq 0 ]; exit $?
 fi
 
+report_fleet_errors() {   # -> 1 when part of the fleet was not looked at
+    [ "${#FLEET_ERRORS[@]}" -gt 0 ] || return 0
+    echo ""
+    echo "not looked at: ${#FLEET_ERRORS[@]}"
+    printf '  %s\n' "${FLEET_ERRORS[@]}"
+    return 1
+}
+
 # --- audit ------------------------------------------------------------------
 # Read-only. A ruleset that exists is not the same as a gate that holds: it can
 # carry bypass actors, in which case `gh pr merge --admin` walks straight
@@ -630,6 +678,10 @@ if $AUDIT; then
     printf '%-40s %-8s %-10s %-12s %s\n' REPOSITORY VISIBLE WORKFLOW REQUIRED BYPASS
     ok=0; advisory=0; total=0
     for repo in "${TARGETS[@]}"; do
+        if ! use_owner_token "$repo"; then
+            printf '%-40s %-8s %-10s %-12s %s\n' "$repo" - no-token - -
+            FLEET_ERRORS+=("$repo: no token for its owner"); continue
+        fi
         db="$(gh repo view "$repo" --json defaultBranchRef --jq '.defaultBranchRef.name // empty' 2>/dev/null)"
         # An empty repository is listed but not counted: there is no history to
         # gate and no default branch to attach a ruleset to, so scoring it as a
@@ -668,12 +720,19 @@ if $AUDIT; then
     echo "enforced: $ok / $total"
     [ "$advisory" -gt 0 ] && echo "advisory: $advisory (private repo in a Free-plan org — GitHub allows no ruleset; the gate runs and comments, nothing blocks the merge)"
     [ "$gaps" -gt 0 ] && echo "gaps:     $gaps (missing workflow, missing ruleset, or a ruleset with bypass actors)"
-    :
-    exit 0
+    report_fleet_errors
+    exit $?
 fi
 
 ROWS=()
+for err in "${FLEET_ERRORS[@]}"; do
+    ROWS+=("${err%%:*}/*"$'\t'"-"$'\t'"error:listing"$'\t'"-"$'\t'"")
+done
 for repo in "${TARGETS[@]}"; do
+    if ! use_owner_token "$repo"; then
+        ROWS+=("$repo"$'\t'"-"$'\t'"error:no-token"$'\t'"-"$'\t'""); echo "$repo: no token for its owner"
+        FLEET_ERRORS+=("$repo: no token for its owner"); continue
+    fi
     db="$(gh repo view "$repo" --json defaultBranchRef --jq '.defaultBranchRef.name // empty' 2>/dev/null)"
     if [ -z "$db" ]; then ROWS+=("$repo"$'\t'"-"$'\t'"skip:empty"$'\t'"-"$'\t'""); echo "$repo: empty, skipped"; continue; fi
     ensure_stub "$repo" "$db"
@@ -702,3 +761,5 @@ if [ -n "$REPORT" ]; then
         done
     } >> "$REPORT"
 fi
+
+report_fleet_errors

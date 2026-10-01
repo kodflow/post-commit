@@ -836,6 +836,57 @@ fx="$(efx supervizio/agent private "$ANNOTATED" content_fails)"; EOUT="$(erun "$
 grep -q 'stub=error:download ' <<< "$EOUT"; eok "deployed file unreadable: an error, not drift" $?
 ! grep -qE -- '-X PUT|^pr create' "$fx/calls.log"; eok "...no write, no pull request" $?
 
+# An App installation token reaches one owner's repositories and nothing else,
+# so the workflow hands over one per owner. Each repository must be served with
+# its own owner's token, and --all must list through the installations, since
+# /user answers no installation token.
+fx="$(efx kodflow/a private "$STUB")"; mkdir -p "$fx/supervizio/b"
+printf private > "$fx/supervizio/b/visibility"; cp "$STUB" "$fx/supervizio/b/workflow.yml"
+printf '%s' '{"repositories":[{"full_name":"kodflow/a","archived":false,"fork":false},{"full_name":"kodflow/old","archived":true,"fork":false}]}' > "$fx/installation.tk-kodflow"
+printf '%s' '{"repositories":[{"full_name":"supervizio/b","archived":false,"fork":false},{"full_name":"supervizio/f","archived":false,"fork":true}]}' > "$fx/installation.tk-supervizio"
+EOUT="$(FLEET_OWNERS="kodflow supervizio" FLEET_TOKEN_KODFLOW=tk-kodflow FLEET_TOKEN_SUPERVIZIO=tk-supervizio erun "$fx" --all)"; rc=$?
+grep -q '^kodflow/a ' <<< "$EOUT" && grep -q '^supervizio/b ' <<< "$EOUT"; eok "per-owner tokens, --all: every owner's installation listed" $?
+eok "...and a run that looked at everything exits 0" "$rc"
+! grep -qE '^(kodflow/old|supervizio/f) ' <<< "$EOUT"; eok "...archived and forked repositories left out" $?
+! grep -qE '^api user' "$fx/calls.log"; eok "...without /user, which refuses an installation token" $?
+grep -q '^tk-kodflow .*repos/kodflow/a' "$fx/tokens.log" && grep -q '^tk-supervizio .*repos/supervizio/b' "$fx/tokens.log"
+eok "...each repository served with its owner's token" $?
+! grep -qE '^tk-kodflow .*supervizio/|^tk-supervizio .*kodflow/' "$fx/tokens.log"; eok "...and never with another owner's" $?
+fx="$(efx supervizio/b private "$STUB")"
+EOUT="$(FLEET_OWNERS="kodflow" FLEET_TOKEN_KODFLOW=tk-kodflow erun "$fx" --apply supervizio/b)"; rc=$?
+grep -q 'no token for its owner' <<< "$EOUT"; eok "an owner without a token: an error row" $?
+! grep -qs 'supervizio/b' "$fx/calls.log"; eok "...and no call at all, not one with the wrong token" $?
+eok "...and the run exits 1: part of the fleet was not looked at" $(( rc == 1 ? 0 : 1 ))
+
+# A listing that fails must not read as an owner with no repositories: the
+# owner is named, the others are still reconciled, and the run exits 1.
+fx="$(efx kodflow/a private "$STUB")"
+printf '%s' '{"repositories":[{"full_name":"kodflow/a","archived":false,"fork":false}]}' > "$fx/installation.tk-kodflow"
+EOUT="$(FLEET_OWNERS="kodflow supervizio" FLEET_TOKEN_KODFLOW=tk-kodflow FLEET_TOKEN_SUPERVIZIO=tk-supervizio erun "$fx" --all --report "$fx/report.md")"; rc=$?
+grep -q 'cannot list the repositories of the supervizio installation' <<< "$EOUT"; eok "--all, one installation unreadable: the owner is named" $?
+grep -q '^kodflow/a ' <<< "$EOUT"; eok "...the other owner is still reconciled" $?
+grep -q '| supervizio/\* | - | error:listing |' "$fx/report.md"; eok "...the report carries an error row for it" $?
+eok "...and the run exits 1" $(( rc == 1 ? 0 : 1 ))
+
+# The audit walks the same targets and must route the same way.
+fx="$(efx kodflow/a private "$STUB")"; mkdir -p "$fx/supervizio/b"
+printf private > "$fx/supervizio/b/visibility"; cp "$STUB" "$fx/supervizio/b/workflow.yml"
+printf '%s' '{"repositories":[{"full_name":"kodflow/a","archived":false,"fork":false}]}' > "$fx/installation.tk-kodflow"
+printf '%s' '{"repositories":[{"full_name":"supervizio/b","archived":false,"fork":false}]}' > "$fx/installation.tk-supervizio"
+EOUT="$(FLEET_OWNERS="kodflow supervizio" FLEET_TOKEN_KODFLOW=tk-kodflow FLEET_TOKEN_SUPERVIZIO=tk-supervizio erun "$fx" --audit --all)"; rc=$?
+grep -qE '^kodflow/a +private +yes +yes +0' <<< "$EOUT" && grep -qE '^supervizio/b +private +yes +yes +0' <<< "$EOUT"
+eok "--audit, per-owner tokens: both owners audited" $?
+grep -q '^tk-kodflow .*repos/kodflow/a/rulesets/1' "$fx/tokens.log" && grep -q '^tk-supervizio .*repos/supervizio/b/rulesets/1' "$fx/tokens.log"
+eok "...each repository read with its owner's token" $?
+! grep -qE '^tk-kodflow .*supervizio/|^tk-supervizio .*kodflow/' "$fx/tokens.log"; eok "...and never with another owner's" $?
+eok "...a complete audit exits 0" "$rc"
+fx="$(efx kodflow/a private "$STUB")"
+EOUT="$(FLEET_OWNERS="kodflow" FLEET_TOKEN_KODFLOW=tk-kodflow erun "$fx" --audit kodflow/a supervizio/b)"; rc=$?
+grep -qE '^supervizio/b +- +no-token' <<< "$EOUT"; eok "--audit, an owner without a token: a no-token row" $?
+! grep -q 'supervizio/b' "$fx/tokens.log"; eok "...and no call for it, not one with the wrong token" $?
+grep -qE '^kodflow/a +private' <<< "$EOUT"; eok "...the other owner is still audited" $?
+eok "...and the audit exits 1" $(( rc == 1 ? 0 : 1 ))
+
 echo "== block-merge pin =="
 # The gate at @main, the token-bearing action at a full SHA — and the script
 # that moves that SHA, driven for real in a throwaway repository.

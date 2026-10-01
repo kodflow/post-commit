@@ -240,8 +240,9 @@ is squashed, run the script once afterwards.
 
 ## Making it mandatory — and irremovable
 
-`scripts/enforce.sh` (or the `enforce` workflow with a `FLEET_TOKEN` PAT)
-puts, on every repository:
+`scripts/enforce.sh` (or the `enforce` workflow, authenticated as the GitHub
+App kodflow-ci with one installation token per owner) puts, on every
+repository:
 
 1. the stub above — opening a PR where it is missing;
 2. a repository **ruleset** named `post-commit` on the default branch:
@@ -405,7 +406,7 @@ stub/post-commit.yml          the file installed in each repo
 stub/pr-body.md               the PR body enforce.sh uses
 tests/run.sh                  behaviour tests against real throwaway repos
 .github/workflows/ci.yml      shellcheck + tests + YAML + dogfood (uses: ./)
-.github/workflows/enforce.yml fleet enforcement from GitHub (needs FLEET_TOKEN)
+.github/workflows/enforce.yml fleet enforcement from GitHub (kodflow-ci app tokens)
 ```
 
 ## Adding a rule
