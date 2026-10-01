@@ -39,3 +39,8 @@ jobs:
       # the daemon's Windows instance-lock tests (`-run Windows`).
       legs: >-
         [{"leg":"macos-arm64","runner":"macos-latest","artifact":"license-tests-darwin","dir":"darwin-arm64","specs":"license.test"},{"leg":"macos-amd64","runner":"macos-15-intel","artifact":"license-tests-darwin","dir":"darwin-amd64","specs":"license.test"},{"leg":"windows-amd64","runner":"windows-latest","artifact":"license-tests-windows","dir":"windows-amd64","specs":"license.test.exe serve.test.exe:Windows"}]
+    # By name, or the called workflow cannot read it (inherit does not cross
+    # owners). Empty here: the key lives only in the private-source
+    # environment, which the called jobs name and GitHub reads it from.
+    secrets:
+      CI_APP_PRIVATE_KEY: ${{ secrets.CI_APP_PRIVATE_KEY }}

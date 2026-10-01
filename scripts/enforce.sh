@@ -548,8 +548,11 @@ ensure_rt_stubs() {   # ensure_rt_stubs <owner/repo> <default-branch> -> RT_STAT
 # Every stub calls kodflow/runner-template at one full SHA, the same in its
 # `uses:` and its `ref:`, and the same in every stub of every owner: a fleet
 # split across two pins is two versions of the logic running at once. Nothing
-# in a stub may run on a pull request, read a secret or name an environment —
-# the called workflow does that, in its own jobs. Network-free: --selftest.
+# in a stub may run on a pull request or name an environment — the called
+# workflow does that, in its own jobs — and the one secret it may name is the
+# App key, passed by name to a lane (a called workflow reads only the secrets
+# it declares, and `inherit` does not cross owners): no other, no inherit, and
+# none at all in the sweep. Network-free: --selftest.
 rt_stub_problems() {   # rt_stub_problems [root] -> one line per problem; rc 1 if any
     local root="${1:-$RT_STUB_ROOT}" f pins uses refs bad=0 all=""
     for f in "$root"/*/*.yml; do
@@ -566,7 +569,17 @@ rt_stub_problems() {   # rt_stub_problems [root] -> one line per problem; rc 1 i
         [ "$(printf '%s\n' "$pins" | grep -c .)" -eq 1 ] || { echo "$f: uses and ref pin different commits"; bad=1; }
         all="$all$pins"$'\n'
         grep -qE '^\s+(pull_request|pull_request_target|workflow_run)\b' "$f" && { echo "$f: a pull_request or workflow_run trigger"; bad=1; }
-        grep -qE '^\s*(secrets|environment):|secrets\.' "$f" && { echo "$f: a stub passes no secret and names no environment"; bad=1; }
+        grep -qE '^\s*environment:|secrets: *inherit' "$f" && { echo "$f: a stub names no environment and inherits no secret"; bad=1; }
+        if [ "${f##*/}" = sweep.yml ]; then
+            grep -qE 'secrets' "$f" && { echo "$f: the sweep takes no secret"; bad=1; }
+        else
+            # Exactly the two lines, in this order, and no other secret named.
+            [ "$(grep -cE 'secrets' "$f")" -eq 2 ] \
+                && grep -qxE '    secrets:' "$f" \
+                && grep -qxF '      CI_APP_PRIVATE_KEY: ${{ secrets.CI_APP_PRIVATE_KEY }}' "$f" \
+                && [ "$(grep -A1 -xE '    secrets:' "$f" | tail -1)" = '      CI_APP_PRIVATE_KEY: ${{ secrets.CI_APP_PRIVATE_KEY }}' ] \
+                || { echo "$f: a lane passes the App key by name, and nothing else"; bad=1; }
+        fi
         grep -qE '^on:[ \t]*[^ \t#]' "$f" && { echo "$f: inline on: form"; bad=1; }
     done
     [ "$(printf '%s' "$all" | grep . | sort -u | grep -c .)" -le 1 ] || { echo "the stubs pin more than one commit of kodflow/runner-template"; bad=1; }
@@ -788,8 +801,12 @@ PY
     rm -f "$rt/x/other.yml"
     awk '{ print } /^  repository_dispatch:$/ { print "  pull_request:" }' "$RT_STUB_ROOT/kodflow/selftest.yml" > "$rt/x/selftest.yml"
     rt_stub_problems "$rt" >/dev/null; t "a stub with a pull_request trigger is refused" 1 $?
-    awk '{ print } /^      payload:/ { print "    secrets: inherit" }' "$RT_STUB_ROOT/kodflow/selftest.yml" > "$rt/x/selftest.yml"
-    rt_stub_problems "$rt" >/dev/null; t "a stub passing secrets is refused" 1 $?
+    sed 's|^    secrets:$|    secrets: inherit|; /^      CI_APP_PRIVATE_KEY:/d' "$RT_STUB_ROOT/kodflow/selftest.yml" > "$rt/x/selftest.yml"
+    rt_stub_problems "$rt" >/dev/null; t "a stub inheriting every secret is refused" 1 $?
+    awk '{ print } /^      CI_APP_PRIVATE_KEY:/ { print "      OTHER: ${{ secrets.OTHER }}" }' "$RT_STUB_ROOT/kodflow/selftest.yml" > "$rt/x/selftest.yml"
+    rt_stub_problems "$rt" >/dev/null; t "a stub passing another secret is refused" 1 $?
+    grep -vE 'secrets|CI_APP_PRIVATE_KEY' "$RT_STUB_ROOT/kodflow/selftest.yml" > "$rt/x/selftest.yml"
+    rt_stub_problems "$rt" >/dev/null; t "a lane that does not pass the App key is refused" 1 $?
     sed 's|@\([0-9a-f]\{40\}\)$|@main|' "$RT_STUB_ROOT/kodflow/selftest.yml" > "$rt/x/selftest.yml"
     rt_stub_problems "$rt" >/dev/null; t "a stub on a branch, not a SHA, is refused" 1 $?
 

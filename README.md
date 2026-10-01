@@ -372,9 +372,13 @@ stub/runner-template/supervizio/…           agent-packages.yml, libprobe-solar
 Every stub pins the same commit, twice (`uses:` takes no expression, so the
 SHA is also passed as `ref` for the scripts the called jobs read), and
 `--selftest` refuses a split fleet, a stub on a branch, a `pull_request`
-trigger, or a stub that passes a secret or names an environment — the called
-workflow names `private-source` in its own jobs, and GitHub resolves it in the
-calling repository. Each owner's sweep must name every dispatched stub of that
+trigger, a stub that names an environment or inherits secrets, and any secret
+but one: a lane passes `CI_APP_PRIVATE_KEY: ${{ secrets.CI_APP_PRIVATE_KEY }}`
+by name, because a called workflow reads only the secrets it declares and
+`inherit` does not cross owners. That value is empty at the stub's level; the
+called workflow names `private-source` in its own jobs, GitHub resolves it in
+the calling repository, and there the environment's key is what those jobs
+read. Each owner's sweep must name every dispatched stub of that
 owner.
 
 **Moving the pin.** Merge the change in kodflow/runner-template, then:
