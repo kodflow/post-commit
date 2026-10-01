@@ -22,7 +22,18 @@
 # ruleset is in place deleting or renaming the stub blocks every PR: the
 # gate cannot be removed from below.
 #
-# Both steps are idempotent; re-running never duplicates a PR or a ruleset.
+#   3. runner-template stubs — on every `<owner>/runner-template` whose owner
+#             has a directory under stub/runner-template/, ensure each file
+#             there is on the default branch as .github/workflows/<file>,
+#             byte for byte; if not, ensure one PR (branch
+#             chore/runner-template) carrying all of them is open. Those
+#             stubs call kodflow/runner-template's reusable workflows at a
+#             pinned commit (scripts/bump-runner-template.sh moves it). Files
+#             the stubs do not name are left alone. With --all, a listed owner
+#             that has stubs but no runner-template repository is reported
+#             (a warning): this script never creates a repository.
+#
+# All three are idempotent; re-running never duplicates a PR or a ruleset.
 # Re-run after the stub PR merges to put the ruleset on: until then the repo
 # is reported as `deferred:stub-not-merged`.
 # Repos on a plan without rulesets (private repos in a Free org) are
@@ -45,6 +56,10 @@ STUB_PATH=".github/workflows/post-commit.yml"
 BRANCH="chore/post-commit"
 LEGACY_BRANCHES=("chore/commit-guard")
 RULESET_NAME="post-commit"
+# The stubs of each owner's public runner-template, one directory per owner.
+RT_STUB_ROOT="$SCRIPT_DIR/../stub/runner-template"
+RT_REPO="runner-template"
+RT_BRANCH="chore/runner-template"
 # This repository gates itself through ci.yml, so it has no stub by design.
 SELF_REPO="kodflow/post-commit"
 GITHUB_ACTIONS_APP_ID=15368
@@ -117,7 +132,7 @@ use_owner_token() {   # use_owner_token <owner[/repo]>: export GH_TOKEN for that
 # skipped part of the fleet must not read as a clean pass.
 FLEET_ERRORS=()
 
-APPLY=false; AUDIT=false; SELFTEST=false; REPORT=""; TARGETS=()
+APPLY=false; AUDIT=false; SELFTEST=false; REPORT=""; TARGETS=(); ALL=false; LISTED=()
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -126,6 +141,7 @@ while [ $# -gt 0 ]; do
         --selftest) SELFTEST=true ;;
         --report) REPORT="$2"; shift ;;
         --all)
+            ALL=true
             # An installation token belongs to no user: /user and /user/orgs
             # refuse it. It lists what its installation reaches instead, which
             # is exactly one owner's repositories.
@@ -142,11 +158,13 @@ while [ $# -gt 0 ]; do
                         continue
                     fi
                     while IFS= read -r r; do [ -n "$r" ] && TARGETS+=("$r"); done <<< "$listing"
+                    LISTED+=("$o")
                 done
                 shift; continue
             fi
             OWNER="$(gh api user --jq .login)"
             mapfile -t ORGS < <(gh api user/orgs --jq '.[].login')
+            LISTED=("$OWNER" "${ORGS[@]}")
             for o in "$OWNER" "${ORGS[@]}"; do
                 while IFS= read -r r; do TARGETS+=("$r"); done < <(
                     gh repo list "$o" --limit 1000 --json nameWithOwner,isArchived,isFork,defaultBranchRef \
@@ -465,6 +483,96 @@ ensure_rule() {   # -> sets RULE_STATE
 }
 
 
+# The runner-template stubs of one repository. Each stub's deployed blob sha is
+# compared with `git hash-object` of ours, as for the gate stub: one API call
+# per file, an exact content check. No override, no annotation: a stub is a
+# pointer at kodflow/runner-template and nothing in it is the repository's.
+#
+# The repository must be PUBLIC. That is the whole point of it — a public
+# repository's hosted minutes are free, and its runs are what the private
+# callers delete once they have their binaries — and a private one would bill
+# every lane it runs. Unreadable visibility is an error, not a guess.
+ensure_rt_stubs() {   # ensure_rt_stubs <owner/repo> <default-branch> -> RT_STATE, RT_PR
+    local repo="$1" db="$2" dir f name want deployed onbranch vis sha out args drift=() n=0
+    RT_STATE=""; RT_PR=""
+    dir="$RT_STUB_ROOT/${repo%%/*}"
+    [ "${repo#*/}" = "$RT_REPO" ] && [ -d "$dir" ] || return 0
+    vis="$(gh api "repos/$repo" --jq .visibility 2>/dev/null)"
+    case "$vis" in
+        public) ;;
+        "") RT_STATE="error:visibility"; return ;;
+        *) RT_STATE="error:$vis"
+           echo "::error::$repo is $vis: a runner-template must be public (its hosted minutes are free, and private callers delete its runs)" >&2
+           return ;;
+    esac
+    for f in "$dir"/*.yml; do
+        [ -f "$f" ] || continue
+        name="${f##*/}"; want="$(git hash-object "$f")"
+        deployed="$(gh api "repos/$repo/contents/.github/workflows/$name?ref=$db" --jq .sha 2>/dev/null)"
+        [ "$deployed" = "$want" ] || drift+=("$name")
+    done
+    if [ "${#drift[@]}" -eq 0 ]; then RT_STATE="present"; return; fi
+
+    RT_PR="$(gh pr list --repo "$repo" --head "$RT_BRANCH" --state open --json url --jq '.[0].url // empty' 2>/dev/null)"
+    if ! $APPLY; then
+        RT_STATE="stale:would-sync(${drift[*]})"; [ -n "$RT_PR" ] && RT_STATE="pr-open:would-update(${drift[*]})"
+        return
+    fi
+
+    if [ -z "$RT_PR" ]; then
+        sha="$(gh api "repos/$repo/git/ref/heads/$db" --jq .object.sha 2>/dev/null)" || { RT_STATE="error:no-sha"; return; }
+        gh api "repos/$repo/git/refs" -X POST -f ref="refs/heads/$RT_BRANCH" -f sha="$sha" >/dev/null 2>&1 \
+            || gh api "repos/$repo/git/refs/heads/$RT_BRANCH" >/dev/null 2>&1 \
+            || { RT_STATE="error:branch"; return; }
+    fi
+    # The branch may already carry some of them (an open PR, or a branch left
+    # behind): only what still differs there is written, so a re-run is a no-op.
+    for name in "${drift[@]}"; do
+        f="$dir/$name"; want="$(git hash-object "$f")"; args=()
+        onbranch="$(gh api "repos/$repo/contents/.github/workflows/$name?ref=$RT_BRANCH" --jq .sha 2>/dev/null)"
+        [ "$onbranch" = "$want" ] && continue
+        [ -n "$onbranch" ] && args=(-f "sha=$onbranch")
+        out="$(gh api "repos/$repo/contents/.github/workflows/$name" -X PUT \
+                -f message="ci(runner-template): sync $name with the central stub" \
+                -f content="$(base64 -w0 < "$f")" -f branch="$RT_BRANCH" "${args[@]}" 2>&1)" \
+            || { RT_STATE="error:put:$name:${out:0:60}"; return; }
+        n=$((n + 1))
+    done
+    if [ -n "$RT_PR" ]; then RT_STATE="pr-open:updated($n)"; return; fi
+    RT_PR="$(gh pr create --repo "$repo" --base "$db" --head "$RT_BRANCH" \
+        --title "ci(runner-template): sync the stubs with kodflow/post-commit" \
+        --body-file "$SCRIPT_DIR/../stub/runner-template-pr-body.md" 2>&1 | grep -oE 'https://[^ ]+' | head -1)"
+    [ -n "$RT_PR" ] && RT_STATE="sync-created(${drift[*]})" || RT_STATE="error:pr"
+}
+
+# Every stub calls kodflow/runner-template at one full SHA, the same in its
+# `uses:` and its `ref:`, and the same in every stub of every owner: a fleet
+# split across two pins is two versions of the logic running at once. Nothing
+# in a stub may run on a pull request, read a secret or name an environment —
+# the called workflow does that, in its own jobs. Network-free: --selftest.
+rt_stub_problems() {   # rt_stub_problems [root] -> one line per problem; rc 1 if any
+    local root="${1:-$RT_STUB_ROOT}" f pins uses refs bad=0 all=""
+    for f in "$root"/*/*.yml; do
+        [ -f "$f" ] || { echo "no stub under $root"; return 1; }
+        uses="$(grep -cE '^    uses: kodflow/runner-template/\.github/workflows/reusable-[a-z0-9-]+\.yml@[0-9a-f]{40}$' "$f")"
+        [ "$uses" -eq 1 ] || { echo "$f: expected one 'uses: kodflow/runner-template/.github/workflows/reusable-*.yml@<sha>', found $uses"; bad=1; continue; }
+        refs="$(grep -cE '^      ref: [0-9a-f]{40}$' "$f")"
+        pins="$(grep -oE '(@|ref: )[0-9a-f]{40}$' "$f" | grep -oE '[0-9a-f]{40}' | sort -u)"
+        if [ "${f##*/}" = sweep.yml ]; then
+            [ "$refs" -eq 0 ] || { echo "$f: the sweep takes no ref"; bad=1; }
+        else
+            [ "$refs" -eq 1 ] || { echo "$f: expected one 'ref: <sha>', found $refs"; bad=1; }
+        fi
+        [ "$(printf '%s\n' "$pins" | grep -c .)" -eq 1 ] || { echo "$f: uses and ref pin different commits"; bad=1; }
+        all="$all$pins"$'\n'
+        grep -qE '^\s+(pull_request|pull_request_target|workflow_run)\b' "$f" && { echo "$f: a pull_request or workflow_run trigger"; bad=1; }
+        grep -qE '^\s*(secrets|environment):|secrets\.' "$f" && { echo "$f: a stub passes no secret and names no environment"; bad=1; }
+        grep -qE '^on:[ \t]*[^ \t#]' "$f" && { echo "$f: inline on: form"; bad=1; }
+    done
+    [ "$(printf '%s' "$all" | grep . | sort -u | grep -c .)" -le 1 ] || { echo "the stubs pin more than one commit of kodflow/runner-template"; bad=1; }
+    [ "$bad" -eq 0 ]
+}
+
 # --- selftest ---------------------------------------------------------------
 # A runner override exists so that two repositories stop being reported as
 # drift. The failure mode of that kind of change is a comparison that can no
@@ -643,17 +751,47 @@ PY
             { n++ } $2 == "accept" { a++ } $2 == "accept" && $3 == "differs" { u++ }
             $2 == "refuse" && $3 == "differs" { b++ } $2 == "refuse" && $3 == "same" { l++ }
             END { print n + 0, a + 0, u + 0, b + 0, l + 0 }')
-        [ "$total" -eq "$made" ] && [ "$made" -gt 0 ]
-        t "oracle: every one of the $made probes got both verdicts" 0 $?
-        [ "$unsound" -eq 0 ]
-        t "oracle: nothing accepted changes what YAML reads ($acc accepted)" 0 $?
+        if [ "$total" -eq "$made" ] && [ "$made" -gt 0 ]; then rc=0; else rc=1; fi
+        t "oracle: every one of the $made probes got both verdicts" 0 "$rc"
+        if [ "$unsound" -eq 0 ]; then rc=0; else rc=1; fi
+        t "oracle: nothing accepted changes what YAML reads ($acc accepted)" 0 "$rc"
         LC_ALL=C join "$o/check.txt" "$o/yaml.txt" | awk '$2 == "accept" && $3 == "differs" { print "       unsound: " $1 }' | head -5
-        [ "$acc" -gt 0 ] && [ "$biting" -gt 0 ]
-        t "oracle: not vacuous — $biting real changes refused" 0 $?
+        if [ "$acc" -gt 0 ] && [ "$biting" -gt 0 ]; then rc=0; else rc=1; fi
+        t "oracle: not vacuous — $biting real changes refused" 0 "$rc"
         echo "  (refused although YAML would not have minded: $lenient — the conservative side, by design)"
     else
         echo "  skip oracle: no python with PyYAML here (CI has one; PC_YAML_PYTHON points at another)"
     fi
+
+    echo "== runner-template stubs =="
+    rt_stub_problems; t "every stub pins one commit, the same everywhere, and holds nothing" 0 $?
+    for o in "$RT_STUB_ROOT"/*/; do
+        o="${o%/}"; o="${o##*/}"
+        if [ -f "$RT_STUB_ROOT/$o/selftest.yml" ] && [ -f "$RT_STUB_ROOT/$o/sweep.yml" ]; then rc=0; else rc=1; fi
+        t "$o has a selftest and a sweep" 0 "$rc"
+        # The sweep must name every dispatched stub of its owner, or a run a
+        # caller never took back stays public: the sweep is the only net.
+        miss=0
+        for f in "$RT_STUB_ROOT/$o"/*.yml; do
+            n="${f##*/}"; [ "$n" = sweep.yml ] && continue
+            grep -qE "^      workflows: (.* )?$n( .*)?$" "$RT_STUB_ROOT/$o/sweep.yml" || miss=1
+        done
+        t "$o's sweep names every dispatched stub" 0 "$miss"
+    done
+    rt="$WORKDIR/rt"; mkdir -p "$rt/x"
+    sed -E 's|^(      ref: )[0-9a-f]{40}$|\1'"$(printf '0%.0s' {1..40})"'|' "$RT_STUB_ROOT/kodflow/selftest.yml" > "$rt/x/selftest.yml"
+    rt_stub_problems "$rt" >/dev/null; t "a stub whose ref and uses disagree is refused" 1 $?
+    rm -f "$rt/x/selftest.yml"; cp "$RT_STUB_ROOT/kodflow/selftest.yml" "$rt/x/"
+    sed -E 's|@[0-9a-f]{40}$|@'"$(printf '1%.0s' {1..40})"'|; s|^(      ref: )[0-9a-f]{40}$|\1'"$(printf '1%.0s' {1..40})"'|' \
+        "$RT_STUB_ROOT/kodflow/selftest.yml" > "$rt/x/other.yml"
+    rt_stub_problems "$rt" >/dev/null; t "two stubs on two pins are refused" 1 $?
+    rm -f "$rt/x/other.yml"
+    awk '{ print } /^  repository_dispatch:$/ { print "  pull_request:" }' "$RT_STUB_ROOT/kodflow/selftest.yml" > "$rt/x/selftest.yml"
+    rt_stub_problems "$rt" >/dev/null; t "a stub with a pull_request trigger is refused" 1 $?
+    awk '{ print } /^      payload:/ { print "    secrets: inherit" }' "$RT_STUB_ROOT/kodflow/selftest.yml" > "$rt/x/selftest.yml"
+    rt_stub_problems "$rt" >/dev/null; t "a stub passing secrets is refused" 1 $?
+    sed 's|@\([0-9a-f]\{40\}\)$|@main|' "$RT_STUB_ROOT/kodflow/selftest.yml" > "$rt/x/selftest.yml"
+    rt_stub_problems "$rt" >/dev/null; t "a stub on a branch, not a SHA, is refused" 1 $?
 
     echo ""
     echo "passed: $t_pass  failed: $t_fail"
@@ -724,7 +862,7 @@ if $AUDIT; then
     exit $?
 fi
 
-ROWS=()
+ROWS=(); RT_ROWS=(); RT_SEEN=()
 for err in "${FLEET_ERRORS[@]}"; do
     ROWS+=("${err%%:*}/*"$'\t'"-"$'\t'"error:listing"$'\t'"-"$'\t'"")
 done
@@ -747,7 +885,30 @@ for repo in "${TARGETS[@]}"; do
     esac
     ROWS+=("$repo"$'\t'"$db"$'\t'"$STUB_STATE${STUB_NOTE:+ ($STUB_NOTE)}"$'\t'"$RULE_STATE"$'\t'"$PR_URL")
     printf '%-40s stub=%-16s rule=%-20s %s%s\n' "$repo" "$STUB_STATE" "$RULE_STATE" "$PR_URL" "${STUB_NOTE:+ [$STUB_NOTE]}"
+    ensure_rt_stubs "$repo" "$db"
+    if [ -n "$RT_STATE" ]; then
+        RT_ROWS+=("$repo"$'\t'"$RT_STATE"$'\t'"$RT_PR")
+        printf '%-40s runner-template-stubs=%s %s\n' "$repo" "$RT_STATE" "$RT_PR"
+        case "$RT_STATE" in error:*) FLEET_ERRORS+=("$repo: runner-template stubs $RT_STATE") ;; esac
+        RT_SEEN+=("${repo%%/*}")
+    fi
 done
+
+# With --all the targets are every repository an owner's listing returned, so
+# a listed owner with stubs and no runner-template among them has nowhere for
+# its private repositories to send their native work. It is reported, loudly,
+# and does not fail the run: creating a public repository is a decision for a
+# person, which no later run of this script can make, and a run that is red
+# every night for it would hide the failures it can repair.
+if $ALL; then
+    for o in ${LISTED[@]+"${LISTED[@]}"}; do
+        [ -d "$RT_STUB_ROOT/$o" ] || continue
+        case " ${RT_SEEN[*]-} " in *" $o "*) continue ;; esac
+        RT_ROWS+=("$o/$RT_REPO"$'\t'"missing"$'\t'"")
+        echo "::warning::$o has runner-template stubs (stub/runner-template/$o) but no $o/$RT_REPO repository: create it (public, environment private-source on main)" >&2
+        printf '%-40s runner-template-stubs=%s\n' "$o/$RT_REPO" "missing"
+    done
+fi
 
 if [ -n "$REPORT" ]; then
     {
@@ -759,6 +920,17 @@ if [ -n "$REPORT" ]; then
             IFS=$'\t' read -r r b s u p <<< "$row"
             printf '| %s | %s | %s | %s | %s |\n' "$r" "$b" "$s" "$u" "${p:+[link]($p)}"
         done
+        if [ "${#RT_ROWS[@]}" -gt 0 ]; then
+            echo ""
+            echo "### runner-template stubs"
+            echo ""
+            echo "| Repository | Stubs | PR |"
+            echo "|---|---|---|"
+            for row in "${RT_ROWS[@]}"; do
+                IFS=$'\t' read -r r s p <<< "$row"
+                printf '| %s | %s | %s |\n' "$r" "$s" "${p:+[link]($p)}"
+            done
+        fi
     } >> "$REPORT"
 fi
 

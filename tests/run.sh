@@ -887,6 +887,75 @@ grep -qE '^supervizio/b +- +no-token' <<< "$EOUT"; eok "--audit, an owner withou
 grep -qE '^kodflow/a +private' <<< "$EOUT"; eok "...the other owner is still audited" $?
 eok "...and the audit exits 1" $(( rc == 1 ? 0 : 1 ))
 
+echo "== enforce: runner-template stubs, against a fake gh =="
+# Every <owner>/runner-template carries its owner's stubs byte for byte, and a
+# drift is put right by one pull request. The fixtures start from the real
+# central stubs, so a change there is exercised here unchanged.
+RTS="$ROOT/stub/runner-template"
+rtfx() {   # rtfx <owner> <visibility> -> a fixture: the gate in place, every stub deployed
+    local d; d="$(efx "$1/runner-template" "$2" "$STUB")"
+    mkdir -p "$d/$1/runner-template/rt"; cp "$RTS/$1"/*.yml "$d/$1/runner-template/rt/"
+    printf '%s' "$d"
+}
+rtput() {   # rtput <fixture> <owner/repo> <file>: what a contents PUT wrote, decoded
+    base64 -d < "$1/$2/rt-put/$3" > "$1/rtput.yml" 2>/dev/null; printf '%s' "$1/rtput.yml"
+}
+
+fx="$(rtfx supervizio public)"; EOUT="$(erun "$fx" --apply supervizio/runner-template)"; rc=$?
+grep -q 'runner-template-stubs=present' <<< "$EOUT"; eok "every stub deployed byte for byte: present" $?
+! grep -qE -- 'contents/\.github/workflows/[^ ]* -X PUT|^pr create' "$fx/calls.log"; eok "...nothing written, no pull request" $?
+eok "...and the run exits 0" "$rc"
+
+fx="$(rtfx supervizio public)"; rm "$fx/supervizio/runner-template/rt/selftest.yml"
+echo "# edited locally" >> "$fx/supervizio/runner-template/rt/agent-packages.yml"
+EOUT="$(erun "$fx" supervizio/runner-template)"
+grep -q 'runner-template-stubs=stale:would-sync(agent-packages.yml selftest.yml)' <<< "$EOUT"; eok "one stub edited, one missing, dry-run: both named as drift" $?
+! grep -qE -- '-X (PUT|POST)|^pr create' "$fx/calls.log"; eok "...and a dry-run writes nothing" $?
+
+fx="$(rtfx supervizio public)"; rm "$fx/supervizio/runner-template/rt/selftest.yml"
+echo "# edited locally" >> "$fx/supervizio/runner-template/rt/agent-packages.yml"
+EOUT="$(erun "$fx" --apply supervizio/runner-template)"
+grep -q 'runner-template-stubs=sync-created(agent-packages.yml selftest.yml) https://' <<< "$EOUT"; eok "--apply: one pull request for the drift" $?
+cmp -s "$(rtput "$fx" supervizio/runner-template agent-packages.yml)" "$RTS/supervizio/agent-packages.yml" \
+    && cmp -s "$(rtput "$fx" supervizio/runner-template selftest.yml)" "$RTS/supervizio/selftest.yml"
+eok "...writing the central copies byte for byte" $?
+set -- "$fx/supervizio/runner-template/rt-put"/*; eok "...and only the two that drifted" $(( $# == 2 ? 0 : 1 ))
+grep -q 'chore/runner-template' "$fx/calls.log" && grep -q 'kodflow/runner-template' "$fx/supervizio/runner-template/rt-pr.body"
+eok "...on chore/runner-template, with a body that says what a stub is" $?
+
+fx="$(rtfx supervizio public)"; rm "$fx/supervizio/runner-template/rt/selftest.yml" "$fx/supervizio/runner-template/rt/sweep.yml"
+mkdir -p "$fx/supervizio/runner-template/rt-branch"; cp "$RTS/supervizio/sweep.yml" "$fx/supervizio/runner-template/rt-branch/"
+printf 'https://github.com/supervizio/runner-template/pull/7' > "$fx/supervizio/runner-template/open_pr.rt"
+EOUT="$(erun "$fx" --apply supervizio/runner-template)"
+grep -q 'runner-template-stubs=pr-open:updated(1) https://github.com/supervizio/runner-template/pull/7' <<< "$EOUT"
+eok "a pull request already open: its branch is brought up to date" $?
+set -- "$fx/supervizio/runner-template/rt-put"/*
+if [ $# -eq 1 ] && [ "${1##*/}" = selftest.yml ]; then rc=0; else rc=1; fi; eok "...writing only what its branch still lacks" "$rc"
+! grep -q '^pr create' "$fx/calls.log"; eok "...and no second pull request" $?
+
+fx="$(rtfx supervizio private)"; EOUT="$(erun "$fx" --apply supervizio/runner-template)"; rc=$?
+grep -q 'runner-template-stubs=error:private' <<< "$EOUT"; eok "a private runner-template: an error, its hosted minutes are billed" $?
+! grep -qE -- 'workflows/[^p][^ ]* -X PUT' "$fx/calls.log"; eok "...no stub written" $?
+eok "...and the run exits 1" $(( rc == 1 ? 0 : 1 ))
+
+fx="$(efx supervizio/agent private "$ANNOTATED")"; EOUT="$(erun "$fx" --apply supervizio/agent)"
+! grep -q 'runner-template-stubs' <<< "$EOUT"; eok "another repository: no stub row" $?
+! grep -qE 'contents/\.github/workflows/(selftest|sweep|agent-packages)' "$fx/calls.log"; eok "...and no stub looked up" $?
+fx="$(efx someone-else/runner-template public "$STUB")"; EOUT="$(erun "$fx" --apply someone-else/runner-template)"
+! grep -q 'runner-template-stubs' <<< "$EOUT"; eok "an owner without stubs: left alone" $?
+
+fx="$(rtfx kodflow public)"; mkdir -p "$fx/kodmain/runner-template"
+printf '%s' '{"repositories":[{"full_name":"kodflow/runner-template","archived":false,"fork":false}]}' > "$fx/installation.tk-kodflow"
+printf '%s' '{"repositories":[]}' > "$fx/installation.tk-kodmain"
+EOUT="$(FLEET_OWNERS="kodflow kodmain" FLEET_TOKEN_KODFLOW=tk-kodflow FLEET_TOKEN_KODMAIN=tk-kodmain erun "$fx" --all --report "$fx/report.md")"; rc=$?
+grep -q '^kodflow/runner-template .*runner-template-stubs=present' <<< "$EOUT"; eok "--all: kodflow's own runner-template holds kodflow's stubs" $?
+grep -q '^kodmain/runner-template .*runner-template-stubs=missing' <<< "$EOUT"; eok "--all: an owner with stubs and no runner-template is named" $?
+grep -q '^::warning::kodmain has runner-template stubs' <<< "$EOUT"; eok "...with a warning annotation on the run" $?
+grep -q '| kodmain/runner-template | missing |' "$fx/report.md"; eok "...in the report too" $?
+! grep -q 'repos/kodmain/runner-template' "$fx/calls.log"; eok "...and nothing is created for it" $?
+eok "...and the run still exits 0: no run of this script can repair it" "$rc"
+! grep -qE '^(kitsunium|supervizio)/runner-template' <<< "$EOUT"; eok "...owners this run did not list are not reported" $?
+
 echo "== block-merge pin =="
 # The gate at @main, the token-bearing action at a full SHA — and the script
 # that moves that SHA, driven for real in a throwaway repository.
@@ -921,6 +990,41 @@ side="$(git -C "$b" rev-parse HEAD)"; git -C "$b" switch -q -
 REF=HEAD bash "$b/scripts/bump-block-merge.sh" "$side" >/dev/null 2>&1; bok "a commit main does not contain is refused (rc 1)" $(( $? == 1 ? 0 : 1 ))
 grep -q "block-merge@$side" "$b/stub/post-commit.yml"; bok "...and not written" $(( $? == 0 ? 1 : 0 ))
 rm -rf "$b"
+
+echo "== runner-template pin =="
+# Every stub moves together, to a commit kodflow/runner-template's main keeps
+# and that carries every workflow a stub calls — driven for real against a
+# throwaway stand-in for that repository.
+r="$(mktemp -d)"; git -C "$r" init -q -b main; git -C "$r" config user.email t@t; git -C "$r" config user.name t
+mkdir -p "$r/.github/workflows"
+for wf in $(grep -hoE 'reusable-[a-z0-9-]+\.yml' "$ROOT"/stub/runner-template/*/*.yml | sort -u); do
+    echo "on: workflow_call" > "$r/.github/workflows/$wf"
+done
+git -C "$r" add -A; git -C "$r" commit -qm "feat: one"; c1="$(git -C "$r" rev-parse HEAD)"
+echo "# two" >> "$r/.github/workflows/reusable-selftest.yml"; git -C "$r" commit -qam "feat: two"; c2="$(git -C "$r" rev-parse HEAD)"
+b="$(mktemp -d)"; mkdir -p "$b/scripts"; cp "$ROOT/scripts/bump-runner-template.sh" "$b/scripts/"
+cp -R "$ROOT/stub" "$b/stub"
+RT_DIR="$r" RT_REF=main bash "$b/scripts/bump-runner-template.sh" "$c1" >/dev/null 2>&1; bok "bump runs" $?
+set -- "$b"/stub/runner-template/*/*.yml; all=$#
+set -- "$b"/stub/runner-template/*/[!s]*.yml "$b"/stub/runner-template/*/selftest.yml; refs=$#
+n="$(grep -lE "@$c1\$" "$b"/stub/runner-template/*/*.yml | wc -l | tr -d ' ')"
+bok "...pinning every stub" $(( n == all ? 0 : 1 ))
+n="$(grep -cE "^      ref: $c1\$" "$b"/stub/runner-template/*/*.yml | awk -F: '{ s += $2 } END { print s }')"
+bok "...uses and ref alike (every stub but the sweep takes a ref)" $(( n == refs ? 0 : 1 ))
+n="$(diff -r "$ROOT/stub/runner-template" "$b/stub/runner-template" | grep -c '^[<>]' || true)"
+m="$(grep -cE '(@|^      ref: )[0-9a-f]{40}$' "$ROOT"/stub/runner-template/*/*.yml | awk -F: '{ s += $2 } END { print s }')"
+bok "...changing those lines and no other" $(( n == 2 * m ? 0 : 1 ))
+RT_DIR="$r" RT_REF=main bash "$b/scripts/bump-runner-template.sh" --verify >/dev/null 2>&1; bok "--verify: on main, every workflow present" $?
+RT_DIR="$r" RT_REF=main bash "$b/scripts/bump-runner-template.sh" --check >/dev/null 2>&1; bok "--check once main moved on: behind (rc 1)" $(( $? == 1 ? 0 : 1 ))
+RT_DIR="$r" RT_REF=main bash "$b/scripts/bump-runner-template.sh" >/dev/null 2>&1
+grep -qE "@$c2\$" "$b/stub/runner-template/kodflow/selftest.yml"; bok "no SHA: the tip of main" $?
+git -C "$r" switch -qc side; echo "# side" >> "$r/.github/workflows/reusable-sweep.yml"; git -C "$r" commit -qam "fix: side"
+side="$(git -C "$r" rev-parse HEAD)"; git -C "$r" switch -q main
+RT_DIR="$r" RT_REF=main bash "$b/scripts/bump-runner-template.sh" "$side" >/dev/null 2>&1; bok "a commit main does not contain is refused (rc 1)" $(( $? == 1 ? 0 : 1 ))
+! grep -q "$side" "$b/stub/runner-template/kodflow/selftest.yml"; bok "...and not written" $?
+git -C "$r" rm -q .github/workflows/reusable-selftest.yml; git -C "$r" commit -qm "chore: drop"; c3="$(git -C "$r" rev-parse HEAD)"
+RT_DIR="$r" RT_REF=main bash "$b/scripts/bump-runner-template.sh" "$c3" >/dev/null 2>&1; bok "a commit missing a called workflow is refused (rc 1)" $(( $? == 1 ? 0 : 1 ))
+rm -rf "$r" "$b"
 
 echo "== usage errors (expect 2) =="
 d=$(mkrepo)

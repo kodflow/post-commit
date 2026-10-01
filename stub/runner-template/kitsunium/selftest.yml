@@ -1,0 +1,31 @@
+# selftest — a runner-template stub, written and kept in sync by
+# kodflow/post-commit (stub/runner-template/kitsunium/selftest.yml, scripts/enforce.sh).
+# A change made here is reverted by the next sync: change it there.
+#
+# The logic is kodflow/runner-template's reusable-selftest.yml at the commit
+# pinned below. The same SHA goes in `ref`: `uses:` takes no expression, and
+# the called jobs read that repository's scripts at `ref`. The run, its log
+# and its artifacts are this repository's, and so are the private-source
+# environment and the kodflow-ci App key the called jobs read. The pin moves
+# with kodflow/post-commit's scripts/bump-runner-template.sh.
+name: selftest
+# The caller finds its run by this exact title: `selftest <request id>`.
+run-name: selftest ${{ github.event.client_payload.request_id }}
+
+on:
+  repository_dispatch:
+    types: [runner-template-selftest]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: selftest-${{ github.event.client_payload.request_id }}
+  cancel-in-progress: true
+
+jobs:
+  selftest:
+    uses: kodflow/runner-template/.github/workflows/reusable-selftest.yml@ffa17c221585a5c390024986503162751c920c9f
+    with:
+      ref: ffa17c221585a5c390024986503162751c920c9f
+      payload: ${{ toJSON(github.event.client_payload) }}

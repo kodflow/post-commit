@@ -22,11 +22,17 @@ jobs:
           shellcheck -S warning scripts/*.sh tests/*.sh
       - name: behaviour tests
         run: bash tests/run.sh
+      # The runner-template stubs pin one commit of kodflow/runner-template:
+      # it must be on that repository's main and carry every workflow they
+      # call, or the next enforce run would roll a dead pin out to every
+      # owner. Reads the public repository anonymously.
+      - name: runner-template pin
+        run: bash scripts/bump-runner-template.sh --verify
       - name: validate YAML
         run: |
           python3 - <<'PY'
           import yaml, glob
-          for f in ['action.yml', 'block-merge/action.yml', 'stub/post-commit.yml'] + sorted(glob.glob('.github/workflows/*.yml')):
+          for f in ['action.yml', 'block-merge/action.yml', 'stub/post-commit.yml'] + sorted(glob.glob('stub/runner-template/*/*.yml')) + sorted(glob.glob('.github/workflows/*.yml')):
               yaml.safe_load(open(f)); print('ok', f)
           PY
 
