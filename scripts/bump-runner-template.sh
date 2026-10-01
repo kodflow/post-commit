@@ -78,6 +78,18 @@ while IFS= read -r wf; do
     esac
 done < <(grep -hoE 'kodflow/runner-template/\.github/workflows/reusable-[a-z0-9-]+\.yml' "$STUBS"/*/*.yml \
             | sed 's|.*/||' | sort -u)
+# Every secret a stub passes must be declared by the workflow it calls, at the
+# pin: GitHub refuses a call passing an undeclared secret before any job runs,
+# so a present file is not yet a compatible one.
+for f in "$STUBS"/*/*.yml; do
+    wf="$(grep -oE 'kodflow/runner-template/\.github/workflows/reusable-[a-z0-9-]+\.yml' "$f" | sed 's|.*/||')"
+    while IFS= read -r s; do
+        [ -n "$s" ] || continue
+        git -C "$RT_DIR" show "$WANT:.github/workflows/$wf" 2>/dev/null \
+            | awk -v s="$s" '/^    secrets:/ { on = 1; next } on && /^    [^ ]/ { on = 0 } on && $0 ~ "^      " s ":" { found = 1 } END { exit !found }' \
+            || { echo "$WANT: .github/workflows/$wf does not declare the secret $s, which ${f#"$STUBS"/} passes" >&2; missing=1; }
+    done < <(grep -oE '^      [A-Z_][A-Z0-9_]*: \$\{\{ secrets\.' "$f" | sed -E 's/^ +([A-Z0-9_]+):.*/\1/')
+done
 [ "$missing" -eq 0 ] || exit 1
 
 case "$MODE" in

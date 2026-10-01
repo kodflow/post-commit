@@ -604,11 +604,18 @@ rt_stub_problems() {   # rt_stub_problems [root] -> one line per problem; rc 1 i
         if [ "${f##*/}" = sweep.yml ]; then
             grep -qE 'secrets' "$f" && { echo "$f: the sweep takes no secret"; bad=1; }
         else
-            # Exactly the two lines, in this order, and no other secret named.
-            [ "$(grep -cE 'secrets' "$f")" -eq 2 ] \
-                && grep -qxE '    secrets:' "$f" \
-                && grep -qxF '      CI_APP_PRIVATE_KEY: ${{ secrets.CI_APP_PRIVATE_KEY }}' "$f" \
-                && [ "$(grep -A1 -xE '    secrets:' "$f" | tail -1)" = '      CI_APP_PRIVATE_KEY: ${{ secrets.CI_APP_PRIVATE_KEY }}' ] \
+            # The whole `secrets:` mapping, entry by entry: exactly one, the
+            # App key by name. Counting occurrences of the word would let
+            # `OTHER: ${{ github.token }}` slip in beside it.
+            local mapping
+            mapping="$(awk '
+                /^    secrets:[[:space:]]*$/ { on = 1; n++; next }
+                on && /^[[:space:]]*(#.*)?$/ { next }
+                on && /^      [^ ]/ { print; next }
+                on { on = 0 }
+            END { if (n != 1) print "SECRETS-BLOCKS:" n }' "$f")"
+            [ "$mapping" = '      CI_APP_PRIVATE_KEY: ${{ secrets.CI_APP_PRIVATE_KEY }}' ] \
+                && [ "$(grep -c 'secrets\.' "$f")" -eq 1 ] \
                 || { echo "$f: a lane passes the App key by name, and nothing else"; bad=1; }
         fi
         grep -qE '^on:[ \t]*[^ \t#]' "$f" && { echo "$f: inline on: form"; bad=1; }
@@ -836,6 +843,8 @@ PY
     rt_stub_problems "$rt" >/dev/null; t "a stub inheriting every secret is refused" 1 $?
     awk '{ print } /^      CI_APP_PRIVATE_KEY:/ { print "      OTHER: ${{ secrets.OTHER }}" }' "$RT_STUB_ROOT/kodflow/selftest.yml" > "$rt/x/selftest.yml"
     rt_stub_problems "$rt" >/dev/null; t "a stub passing another secret is refused" 1 $?
+    awk '{ print } /^      CI_APP_PRIVATE_KEY:/ { print "      OTHER: ${{ github.token }}" }' "$RT_STUB_ROOT/kodflow/selftest.yml" > "$rt/x/selftest.yml"
+    rt_stub_problems "$rt" >/dev/null; t "a stub passing another value, not a secret, is refused" 1 $?
     grep -vE 'secrets|CI_APP_PRIVATE_KEY' "$RT_STUB_ROOT/kodflow/selftest.yml" > "$rt/x/selftest.yml"
     rt_stub_problems "$rt" >/dev/null; t "a lane that does not pass the App key is refused" 1 $?
     sed 's|@\([0-9a-f]\{40\}\)$|@main|' "$RT_STUB_ROOT/kodflow/selftest.yml" > "$rt/x/selftest.yml"

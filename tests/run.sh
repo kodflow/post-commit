@@ -1028,7 +1028,7 @@ echo "== runner-template pin =="
 r="$(mktemp -d)"; git -C "$r" init -q -b main; git -C "$r" config user.email t@t; git -C "$r" config user.name t
 mkdir -p "$r/.github/workflows"
 for wf in $(grep -hoE 'reusable-[a-z0-9-]+\.yml' "$ROOT"/stub/runner-template/*/*.yml | sort -u); do
-    echo "on: workflow_call" > "$r/.github/workflows/$wf"
+    printf 'on:\n  workflow_call:\n    secrets:\n      CI_APP_PRIVATE_KEY:\n        required: false\n' > "$r/.github/workflows/$wf"
 done
 git -C "$r" add -A; git -C "$r" commit -qm "feat: one"; c1="$(git -C "$r" rev-parse HEAD)"
 echo "# two" >> "$r/.github/workflows/reusable-selftest.yml"; git -C "$r" commit -qam "feat: two"; c2="$(git -C "$r" rev-parse HEAD)"
@@ -1052,6 +1052,8 @@ git -C "$r" switch -qc side; echo "# side" >> "$r/.github/workflows/reusable-swe
 side="$(git -C "$r" rev-parse HEAD)"; git -C "$r" switch -q main
 RT_DIR="$r" RT_REF=main bash "$b/scripts/bump-runner-template.sh" "$side" >/dev/null 2>&1; bok "a commit main does not contain is refused (rc 1)" $(( $? == 1 ? 0 : 1 ))
 ! grep -q "$side" "$b/stub/runner-template/kodflow/selftest.yml"; bok "...and not written" $?
+echo "on: workflow_call" > "$r/.github/workflows/reusable-selftest.yml"; git -C "$r" commit -qam "chore: undeclare"; cu="$(git -C "$r" rev-parse HEAD)"
+RT_DIR="$r" RT_REF=main bash "$b/scripts/bump-runner-template.sh" "$cu" >/dev/null 2>&1; bok "a pin whose workflow does not declare a secret a stub passes is refused (rc 1)" $(( $? == 1 ? 0 : 1 ))
 git -C "$r" rm -q .github/workflows/reusable-selftest.yml; mkdir "$r/.github/workflows/reusable-selftest.yml"
 echo x > "$r/.github/workflows/reusable-selftest.yml/x"; git -C "$r" add -A; git -C "$r" commit -qm "chore: a directory"; cd_="$(git -C "$r" rev-parse HEAD)"
 RT_DIR="$r" RT_REF=main bash "$b/scripts/bump-runner-template.sh" "$cd_" >/dev/null 2>&1; bok "a directory at a called workflow's path is refused (rc 1)" $(( $? == 1 ? 0 : 1 ))
