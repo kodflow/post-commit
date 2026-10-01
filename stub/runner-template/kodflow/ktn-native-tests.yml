@@ -1,0 +1,46 @@
+# ktn-native-tests — a runner-template stub, written and kept in sync by
+# kodflow/post-commit (stub/runner-template/kodflow/ktn-native-tests.yml, scripts/enforce.sh).
+# A change made here is reverted by the next sync: change it there.
+#
+# The logic is kodflow/runner-template's reusable-native-tests.yml at the commit
+# pinned below. The same SHA goes in `ref`: `uses:` takes no expression, and
+# the called jobs read that repository's scripts at `ref`. The run, its log
+# and its artifacts are this repository's, and so are the private-source
+# environment and the kodflow-ci App key the called jobs read. The pin moves
+# with kodflow/post-commit's scripts/bump-runner-template.sh.
+#
+# Called by kodflow/ktn-linter's `native` job: its [macos] and [windows]
+# lanes cross-compile `go test -c` binaries, run here on real kernels.
+name: ktn-native-tests
+# The caller finds its run by this exact title: `ktn-native-tests <request id>`.
+run-name: ktn-native-tests ${{ github.event.client_payload.request_id }}
+
+on:
+  repository_dispatch:
+    types: [ktn-native-tests]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ktn-native-tests-${{ github.event.client_payload.request_id }}
+  cancel-in-progress: true
+
+jobs:
+  native-tests:
+    uses: kodflow/runner-template/.github/workflows/reusable-native-tests.yml@f095f97884453e9e3f1f65028c4a7121442fa98e
+    with:
+      ref: f095f97884453e9e3f1f65028c4a7121442fa98e
+      payload: ${{ toJSON(github.event.client_payload) }}
+      source_repo: kodflow/ktn-linter
+      report_prefix: ktn-native-
+      # macos-arm64: the licence package on Apple Silicon; macos-amd64: the
+      # same binary on an Intel kernel; windows-amd64: the licence package and
+      # the daemon's Windows instance-lock tests (`-run Windows`).
+      legs: >-
+        [{"leg":"macos-arm64","runner":"macos-latest","artifact":"license-tests-darwin","dir":"darwin-arm64","specs":"license.test"},{"leg":"macos-amd64","runner":"macos-15-intel","artifact":"license-tests-darwin","dir":"darwin-amd64","specs":"license.test"},{"leg":"windows-amd64","runner":"windows-latest","artifact":"license-tests-windows","dir":"windows-amd64","specs":"license.test.exe serve.test.exe:Windows"}]
+    # By name, or the called workflow cannot read it (inherit does not cross
+    # owners). Empty here: the key lives only in the private-source
+    # environment, which the called jobs name and GitHub reads it from.
+    secrets:
+      CI_APP_PRIVATE_KEY: ${{ secrets.CI_APP_PRIVATE_KEY }}

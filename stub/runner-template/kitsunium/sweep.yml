@@ -1,0 +1,33 @@
+# sweep — a runner-template stub, written and kept in sync by
+# kodflow/post-commit (stub/runner-template/kitsunium/sweep.yml, scripts/enforce.sh).
+# A change made here is reverted by the next sync: change it there.
+#
+# The logic is kodflow/runner-template's reusable-sweep.yml at the commit
+# pinned below. The same SHA goes in `ref`: `uses:` takes no expression, and
+# the called jobs read that repository's scripts at `ref`. The run, its log
+# and its artifacts are this repository's, and so are the private-source
+# environment and the kodflow-ci App key the called jobs read. The pin moves
+# with kodflow/post-commit's scripts/bump-runner-template.sh.
+#
+# Deletes the repository_dispatch runs of the workflows named below that no
+# caller took back (completed for two hours, or alive for three). Nothing
+# else of this repository is touched.
+name: sweep
+
+on:
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+
+permissions:
+  actions: write
+
+concurrency:
+  group: sweep
+  cancel-in-progress: false
+
+jobs:
+  sweep:
+    uses: kodflow/runner-template/.github/workflows/reusable-sweep.yml@f095f97884453e9e3f1f65028c4a7121442fa98e
+    with:
+      workflows: selftest.yml

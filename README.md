@@ -340,6 +340,57 @@ repositories blind to every future change to the stub — which is the failure
 this script exists to catch. A check that can no longer fail is worse than no
 check, because it reports green forever and nobody looks again.
 
+### The runner-template stubs
+
+The same run keeps one more thing in place: the public companion CI of each
+owner. `<owner>/runner-template` (kodflow, supervizio, kitsunium, kodmain) is
+the public repository where the private repositories send what their
+self-hosted Linux runners cannot do — macOS and Windows builds, BSD and
+illumos packaging, native test binaries — because a public repository's
+hosted minutes are free. Its workflows are **stubs**: a few lines
+`on: repository_dispatch` calling a reusable workflow of
+[kodflow/runner-template](https://github.com/kodflow/runner-template) at a full
+commit SHA, where all the logic lives.
+
+They live here, under `stub/runner-template/<owner>/`, and `enforce.sh`
+compares each file with the owner's runner-template by blob sha, exactly as
+it does for the gate. Missing or different, they are written — all of them in
+one pull request on `chore/runner-template` — and an open one is brought up to
+date rather than duplicated. Files no stub names (supervizio's E2E and release
+lanes, kodflow/runner-template's own reusable workflows) are left alone. The
+runner-template must be public, or the row is an error. With `--all`, a listed
+owner that has stubs and no runner-template is reported as `missing` with a
+warning, and not failed: creating a public repository is a person's decision.
+
+```
+stub/runner-template/<owner>/selftest.yml   every owner: an end-to-end check of the wiring
+stub/runner-template/<owner>/sweep.yml      every owner: deletes runs no caller took back
+stub/runner-template/kodflow/…              darwin-build.yml, ktn-native-tests.yml
+stub/runner-template/supervizio/…           agent-packages.yml, libprobe-solarish.yml
+```
+
+Every stub pins the same commit, twice (`uses:` takes no expression, so the
+SHA is also passed as `ref` for the scripts the called jobs read), and
+`--selftest` refuses a split fleet, a stub on a branch, a `pull_request`
+trigger, a stub that names an environment or inherits secrets, and any secret
+but one: a lane passes `CI_APP_PRIVATE_KEY: ${{ secrets.CI_APP_PRIVATE_KEY }}`
+by name, because a called workflow reads only the secrets it declares and
+`inherit` does not cross owners. That value is empty at the stub's level; the
+called workflow names `private-source` in its own jobs, GitHub resolves it in
+the calling repository, and there the environment's key is what those jobs
+read. Each owner's sweep must name every dispatched stub of that
+owner.
+
+**Moving the pin.** Merge the change in kodflow/runner-template, then:
+
+```sh
+scripts/bump-runner-template.sh            # every stub to the tip of its main
+scripts/bump-runner-template.sh <sha>      # or to a given commit on its main
+scripts/bump-runner-template.sh --verify   # what CI runs: pin on main, every called workflow present
+```
+
+and merge that here. The next enforce run opens the sync on every owner.
+
 ### What GitHub cannot enforce
 
 - **Private repositories in a Free organisation** have neither rulesets nor
@@ -400,10 +451,13 @@ scripts/post-commit.sh        the gate
 scripts/patterns.txt          default forbidden patterns (attribution-shaped)
 scripts/patterns-strict.txt   opt-in keyword patterns
 scripts/agent-paths.txt       agent RUNTIME paths (logs, transcripts, caches); config kept
-scripts/enforce.sh            fleet: stub PR + ruleset, idempotent
+scripts/enforce.sh            fleet: stub PR + ruleset + runner-template stubs, idempotent
+scripts/bump-runner-template.sh  move every runner-template stub to one kodflow/runner-template commit
 scripts/rewrite-history.sh    history scrub (messages + identities), dry-run by default
 stub/post-commit.yml          the file installed in each repo
 stub/pr-body.md               the PR body enforce.sh uses
+stub/runner-template/<owner>/ the stubs installed in each <owner>/runner-template
+stub/runner-template-pr-body.md  the PR body of their sync
 tests/run.sh                  behaviour tests against real throwaway repos
 .github/workflows/ci.yml      shellcheck + tests + YAML + dogfood (uses: ./)
 .github/workflows/enforce.yml fleet enforcement from GitHub (kodflow-ci app tokens)

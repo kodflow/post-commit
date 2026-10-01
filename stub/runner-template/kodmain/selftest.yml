@@ -1,0 +1,36 @@
+# selftest — a runner-template stub, written and kept in sync by
+# kodflow/post-commit (stub/runner-template/kodmain/selftest.yml, scripts/enforce.sh).
+# A change made here is reverted by the next sync: change it there.
+#
+# The logic is kodflow/runner-template's reusable-selftest.yml at the commit
+# pinned below. The same SHA goes in `ref`: `uses:` takes no expression, and
+# the called jobs read that repository's scripts at `ref`. The run, its log
+# and its artifacts are this repository's, and so are the private-source
+# environment and the kodflow-ci App key the called jobs read. The pin moves
+# with kodflow/post-commit's scripts/bump-runner-template.sh.
+name: selftest
+# The caller finds its run by this exact title: `selftest <request id>`.
+run-name: selftest ${{ github.event.client_payload.request_id }}
+
+on:
+  repository_dispatch:
+    types: [runner-template-selftest]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: selftest-${{ github.event.client_payload.request_id }}
+  cancel-in-progress: true
+
+jobs:
+  selftest:
+    uses: kodflow/runner-template/.github/workflows/reusable-selftest.yml@f095f97884453e9e3f1f65028c4a7121442fa98e
+    with:
+      ref: f095f97884453e9e3f1f65028c4a7121442fa98e
+      payload: ${{ toJSON(github.event.client_payload) }}
+    # By name, or the called workflow cannot read it (inherit does not cross
+    # owners). Empty here: the key lives only in the private-source
+    # environment, which the called jobs name and GitHub reads it from.
+    secrets:
+      CI_APP_PRIVATE_KEY: ${{ secrets.CI_APP_PRIVATE_KEY }}
