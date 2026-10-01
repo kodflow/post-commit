@@ -99,6 +99,7 @@ case "$sub" in
             "POST /git/refs") out '{"ref":"refs/heads/chore/post-commit"}' ;;
             "GET /git/refs/heads/chore/post-commit") out '{"ref":"refs/heads/chore/post-commit"}' ;;
             "GET /rulesets") out '[{"id":1,"name":"post-commit"}]' ;;
+            "GET /rulesets/1") out '{"id":1,"name":"post-commit","bypass_actors":[]}' ;;
             "PUT /rulesets/1"|"POST /rulesets") out '{"id":1}' ;;
             *) unknown ;;
         esac ;;
