@@ -492,8 +492,21 @@ ensure_rule() {   # -> sets RULE_STATE
 # repository's hosted minutes are free, and its runs are what the private
 # callers delete once they have their binaries — and a private one would bill
 # every lane it runs. Unreadable visibility is an error, not a guess.
+# The blob sha of one workflow file on one ref. A missing file and a failed
+# lookup are different answers: only a confirmed 404 means "not there". A 401,
+# a 403, a rate limit or a 5xx read as absence would turn a network blip into
+# drift, and with --apply into a sync branch and a pull request built on it.
+rt_blob() {   # rt_blob <owner/repo> <file> <ref> -> the sha; rc 0 found, 1 absent (404), 2 lookup failed
+    local out
+    if out="$(gh api "repos/$1/contents/.github/workflows/$2?ref=$3" --jq .sha 2>"$WORKDIR/rt-blob.err")"; then
+        printf '%s' "$out"; return 0
+    fi
+    grep -q 'HTTP 404' "$WORKDIR/rt-blob.err" && return 1
+    return 2
+}
+
 ensure_rt_stubs() {   # ensure_rt_stubs <owner/repo> <default-branch> -> RT_STATE, RT_PR
-    local repo="$1" db="$2" dir f name want deployed onbranch vis sha out args drift=() n=0
+    local repo="$1" db="$2" dir f name want deployed onbranch vis sha out args rc drift=() n=0
     RT_STATE=""; RT_PR=""
     dir="$RT_STUB_ROOT/${repo%%/*}"
     [ "${repo#*/}" = "$RT_REPO" ] && [ -d "$dir" ] || return 0
@@ -508,12 +521,29 @@ ensure_rt_stubs() {   # ensure_rt_stubs <owner/repo> <default-branch> -> RT_STAT
     for f in "$dir"/*.yml; do
         [ -f "$f" ] || continue
         name="${f##*/}"; want="$(git hash-object "$f")"
-        deployed="$(gh api "repos/$repo/contents/.github/workflows/$name?ref=$db" --jq .sha 2>/dev/null)"
+        deployed="$(rt_blob "$repo" "$name" "$db")"; rc=$?
+        [ "$rc" -eq 2 ] && { RT_STATE="error:read:$name"; return; }
         [ "$deployed" = "$want" ] || drift+=("$name")
     done
-    if [ "${#drift[@]}" -eq 0 ]; then RT_STATE="present"; return; fi
 
-    RT_PR="$(gh pr list --repo "$repo" --head "$RT_BRANCH" --state open --json url --jq '.[0].url // empty' 2>/dev/null)"
+    # A failed lookup is not "no pull request": read as one, it would open a
+    # second sync next to the first.
+    RT_PR="$(gh pr list --repo "$repo" --head "$RT_BRANCH" --state open --json url --jq '.[0].url // empty' 2>/dev/null)" \
+        || { RT_STATE="error:pr-lookup"; RT_PR=""; return; }
+
+    if [ "${#drift[@]}" -eq 0 ]; then
+        # Current on the default branch, and a sync still open: its branch
+        # carries some other version of the stubs (an older central copy, a
+        # change since reverted) and merging it would put that back. It is
+        # closed, not left for someone to merge by mistake.
+        if [ -z "$RT_PR" ]; then RT_STATE="present"; return; fi
+        if ! $APPLY; then RT_STATE="present:would-close($RT_PR)"; return; fi
+        gh pr close "$RT_PR" --repo "$repo" --delete-branch \
+            --comment "Closed by kodflow/post-commit's enforce: the default branch already carries the central stubs, so this branch could only bring an obsolete version back." \
+            >/dev/null 2>&1 || { RT_STATE="error:close:$RT_PR"; return; }
+        RT_STATE="present:closed-obsolete($RT_PR)"; return
+    fi
+
     if ! $APPLY; then
         RT_STATE="stale:would-sync(${drift[*]})"; [ -n "$RT_PR" ] && RT_STATE="pr-open:would-update(${drift[*]})"
         return
@@ -529,7 +559,8 @@ ensure_rt_stubs() {   # ensure_rt_stubs <owner/repo> <default-branch> -> RT_STAT
     # behind): only what still differs there is written, so a re-run is a no-op.
     for name in "${drift[@]}"; do
         f="$dir/$name"; want="$(git hash-object "$f")"; args=()
-        onbranch="$(gh api "repos/$repo/contents/.github/workflows/$name?ref=$RT_BRANCH" --jq .sha 2>/dev/null)"
+        onbranch="$(rt_blob "$repo" "$name" "$RT_BRANCH")"; rc=$?
+        [ "$rc" -eq 2 ] && { RT_STATE="error:read:$name@$RT_BRANCH"; return; }
         [ "$onbranch" = "$want" ] && continue
         [ -n "$onbranch" ] && args=(-f "sha=$onbranch")
         out="$(gh api "repos/$repo/contents/.github/workflows/$name" -X PUT \
@@ -889,7 +920,16 @@ for repo in "${TARGETS[@]}"; do
         FLEET_ERRORS+=("$repo: no token for its owner"); continue
     fi
     db="$(gh repo view "$repo" --json defaultBranchRef --jq '.defaultBranchRef.name // empty' 2>/dev/null)"
-    if [ -z "$db" ]; then ROWS+=("$repo"$'\t'"-"$'\t'"skip:empty"$'\t'"-"$'\t'""); echo "$repo: empty, skipped"; continue; fi
+    if [ -z "$db" ]; then
+        ROWS+=("$repo"$'\t'"-"$'\t'"skip:empty"$'\t'"-"$'\t'""); echo "$repo: empty, skipped"
+        # An empty runner-template exists: it is not "missing", and the stubs
+        # need a first commit to land on, which is a person's to make.
+        if [ "${repo#*/}" = "$RT_REPO" ] && [ -d "$RT_STUB_ROOT/${repo%%/*}" ]; then
+            RT_ROWS+=("$repo"$'\t'"skip:empty"$'\t'""); RT_SEEN+=("${repo%%/*}")
+            printf '%-40s runner-template-stubs=%s\n' "$repo" "skip:empty"
+        fi
+        continue
+    fi
     ensure_stub "$repo" "$db"
     # The ruleset goes on only once the stub is actually on the default
     # branch. Creating it first makes `post-commit` a required status that no

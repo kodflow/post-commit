@@ -933,6 +933,31 @@ set -- "$fx/supervizio/runner-template/rt-put"/*
 if [ $# -eq 1 ] && [ "${1##*/}" = selftest.yml ]; then rc=0; else rc=1; fi; eok "...writing only what its branch still lacks" "$rc"
 ! grep -q '^pr create' "$fx/calls.log"; eok "...and no second pull request" $?
 
+# A failed read is not a missing file: only a 404 is drift.
+fx="$(rtfx supervizio public)"; mkdir -p "$fx/supervizio/runner-template/rt-fail"; : > "$fx/supervizio/runner-template/rt-fail/sweep.yml"
+EOUT="$(erun "$fx" --apply supervizio/runner-template)"; rc=$?
+grep -q 'runner-template-stubs=error:read:sweep.yml' <<< "$EOUT"; eok "a stub read failing with a 502: an error, not drift" $?
+! grep -qE -- 'workflows/[a-z-]+\.yml -X PUT|git/refs -X POST|^pr (create|list)' "$fx/calls.log"; eok "...no branch, no write, no pull request" $?
+eok "...and the run exits 1" $(( rc == 1 ? 0 : 1 ))
+
+# A failed pull-request lookup is not "none open": that would open a second.
+fx="$(rtfx supervizio public)"; rm "$fx/supervizio/runner-template/rt/selftest.yml"; : > "$fx/supervizio/runner-template/pr_list_fails"
+EOUT="$(erun "$fx" --apply supervizio/runner-template)"; rc=$?
+grep -q 'runner-template-stubs=error:pr-lookup' <<< "$EOUT"; eok "the pull request lookup failing: an error, not 'none open'" $?
+! grep -qE -- 'workflows/[a-z-]+\.yml -X PUT|git/refs -X POST|^pr create' "$fx/calls.log"; eok "...no branch, no write, no second pull request" $?
+eok "...and the run exits 1" $(( rc == 1 ? 0 : 1 ))
+
+# Current on the default branch with a sync still open: that branch could only
+# bring an obsolete version back, so it is closed.
+fx="$(rtfx supervizio public)"; printf 'https://github.com/supervizio/runner-template/pull/9' > "$fx/supervizio/runner-template/open_pr.rt"
+EOUT="$(erun "$fx" supervizio/runner-template)"
+grep -q 'runner-template-stubs=present:would-close(https://github.com/supervizio/runner-template/pull/9)' <<< "$EOUT"; eok "current, an obsolete sync open, dry-run: would close it" $?
+! grep -q '^pr close' "$fx/calls.log"; eok "...and a dry-run closes nothing" $?
+EOUT="$(erun "$fx" --apply supervizio/runner-template)"
+grep -q 'runner-template-stubs=present:closed-obsolete(' <<< "$EOUT" && [ "$(cat "$fx/supervizio/runner-template/pr.closed")" = https://github.com/supervizio/runner-template/pull/9 ]
+eok "...--apply closes that pull request" $?
+! grep -qE -- 'workflows/[a-z-]+\.yml -X PUT|git/refs -X POST|^pr create' "$fx/calls.log"; eok "...and writes nothing" $?
+
 fx="$(rtfx supervizio private)"; EOUT="$(erun "$fx" --apply supervizio/runner-template)"; rc=$?
 grep -q 'runner-template-stubs=error:private' <<< "$EOUT"; eok "a private runner-template: an error, its hosted minutes are billed" $?
 ! grep -qE -- 'workflows/[^p][^ ]* -X PUT' "$fx/calls.log"; eok "...no stub written" $?
@@ -954,6 +979,11 @@ grep -q '^::warning::kodmain has runner-template stubs' <<< "$EOUT"; eok "...wit
 grep -q '| kodmain/runner-template | missing |' "$fx/report.md"; eok "...in the report too" $?
 ! grep -q 'repos/kodmain/runner-template' "$fx/calls.log"; eok "...and nothing is created for it" $?
 eok "...and the run still exits 0: no run of this script can repair it" "$rc"
+fx="$(efx kodmain/runner-template public -)"; : > "$fx/kodmain/runner-template/empty"
+printf '%s' '{"repositories":[{"full_name":"kodmain/runner-template","archived":false,"fork":false}]}' > "$fx/installation.tk-kodmain"
+EOUT="$(FLEET_OWNERS="kodmain" FLEET_TOKEN_KODMAIN=tk-kodmain erun "$fx" --all)"
+grep -q '^kodmain/runner-template .*runner-template-stubs=skip:empty' <<< "$EOUT"; eok "--all: an empty runner-template is skip:empty" $?
+! grep -q 'runner-template-stubs=missing' <<< "$EOUT"; eok "...not reported as missing" $?
 ! grep -qE '^(kitsunium|supervizio)/runner-template' <<< "$EOUT"; eok "...owners this run did not list are not reported" $?
 
 echo "== block-merge pin =="
@@ -1022,6 +1052,12 @@ git -C "$r" switch -qc side; echo "# side" >> "$r/.github/workflows/reusable-swe
 side="$(git -C "$r" rev-parse HEAD)"; git -C "$r" switch -q main
 RT_DIR="$r" RT_REF=main bash "$b/scripts/bump-runner-template.sh" "$side" >/dev/null 2>&1; bok "a commit main does not contain is refused (rc 1)" $(( $? == 1 ? 0 : 1 ))
 ! grep -q "$side" "$b/stub/runner-template/kodflow/selftest.yml"; bok "...and not written" $?
+git -C "$r" rm -q .github/workflows/reusable-selftest.yml; mkdir "$r/.github/workflows/reusable-selftest.yml"
+echo x > "$r/.github/workflows/reusable-selftest.yml/x"; git -C "$r" add -A; git -C "$r" commit -qm "chore: a directory"; cd_="$(git -C "$r" rev-parse HEAD)"
+RT_DIR="$r" RT_REF=main bash "$b/scripts/bump-runner-template.sh" "$cd_" >/dev/null 2>&1; bok "a directory at a called workflow's path is refused (rc 1)" $(( $? == 1 ? 0 : 1 ))
+git -C "$r" rm -rq .github/workflows/reusable-selftest.yml; ln -s reusable-sweep.yml "$r/.github/workflows/reusable-selftest.yml"
+git -C "$r" add -A; git -C "$r" commit -qm "chore: a symlink"; cl="$(git -C "$r" rev-parse HEAD)"
+RT_DIR="$r" RT_REF=main bash "$b/scripts/bump-runner-template.sh" "$cl" >/dev/null 2>&1; bok "a symlink at a called workflow's path is refused (rc 1)" $(( $? == 1 ? 0 : 1 ))
 git -C "$r" rm -q .github/workflows/reusable-selftest.yml; git -C "$r" commit -qm "chore: drop"; c3="$(git -C "$r" rev-parse HEAD)"
 RT_DIR="$r" RT_REF=main bash "$b/scripts/bump-runner-template.sh" "$c3" >/dev/null 2>&1; bok "a commit missing a called workflow is refused (rc 1)" $(( $? == 1 ? 0 : 1 ))
 rm -rf "$r" "$b"

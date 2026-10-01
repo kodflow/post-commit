@@ -68,8 +68,14 @@ git -C "$RT_DIR" merge-base --is-ancestor "$WANT" "$RT_REF" \
     || { echo "$WANT is not reachable from $RT_REF: pin a commit main keeps" >&2; exit 1; }
 missing=0
 while IFS= read -r wf; do
-    git -C "$RT_DIR" cat-file -e "$WANT:.github/workflows/$wf" 2>/dev/null \
-        || { echo "$WANT has no .github/workflows/$wf, which a stub calls" >&2; missing=1; }
+    # A regular file, not merely an object at that path: a directory, a
+    # symlink or a submodule there is nothing GitHub can load as a workflow.
+    entry="$(git -C "$RT_DIR" ls-tree "$WANT" -- ".github/workflows/$wf")"
+    case "$entry" in
+        "100644 blob "*|"100755 blob "*) ;;
+        "") echo "$WANT has no .github/workflows/$wf, which a stub calls" >&2; missing=1 ;;
+        *) echo "$WANT has .github/workflows/$wf, but not as a regular file (${entry%% *})" >&2; missing=1 ;;
+    esac
 done < <(grep -hoE 'kodflow/runner-template/\.github/workflows/reusable-[a-z0-9-]+\.yml' "$STUBS"/*/*.yml \
             | sed 's|.*/||' | sort -u)
 [ "$missing" -eq 0 ] || exit 1
