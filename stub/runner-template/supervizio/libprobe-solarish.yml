@@ -27,7 +27,7 @@ concurrency:
 
 jobs:
   libprobe-solarish:
-    uses: kodflow/runner-template/.github/workflows/reusable-libprobe-solarish.yml@ffa17c221585a5c390024986503162751c920c9f
+    uses: kodflow/runner-template/.github/workflows/reusable-libprobe-solarish.yml@2b09ce738ae9f32cc437e7377bc974a141f2f454
     with:
-      ref: ffa17c221585a5c390024986503162751c920c9f
+      ref: 2b09ce738ae9f32cc437e7377bc974a141f2f454
       payload: ${{ toJSON(github.event.client_payload) }}
