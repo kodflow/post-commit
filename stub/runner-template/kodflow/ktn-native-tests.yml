@@ -28,9 +28,9 @@ concurrency:
 
 jobs:
   native-tests:
-    uses: kodflow/runner-template/.github/workflows/reusable-native-tests.yml@2b09ce738ae9f32cc437e7377bc974a141f2f454
+    uses: kodflow/runner-template/.github/workflows/reusable-native-tests.yml@f095f97884453e9e3f1f65028c4a7121442fa98e
     with:
-      ref: 2b09ce738ae9f32cc437e7377bc974a141f2f454
+      ref: f095f97884453e9e3f1f65028c4a7121442fa98e
       payload: ${{ toJSON(github.event.client_payload) }}
       source_repo: kodflow/ktn-linter
       report_prefix: ktn-native-
