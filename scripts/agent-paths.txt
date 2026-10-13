@@ -7,7 +7,7 @@
 # WHAT THIS REFUSES — what an agent WRITES, never what a human wrote for it.
 #
 # An agent's configuration is source. `.claude/agents/`, `.claude/commands/`,
-# `.claude/skills/`, `.mcp.json`, `.cursor/rules/`, `.clinerules` — someone
+# `.claude/skills/`, `.cursor/rules/`, `.clinerules` — someone
 # authored those, reviewed them, and wants them shared with the next person to
 # clone the repository. Refusing them would be refusing the work.
 #
@@ -35,9 +35,13 @@
 #
 #   · `.claude/agents/` `commands/` `skills/` `docs/` `scripts/` `templates/`
 #     `workflows/` `settings.json` `.claude.json` `features.json` — authored.
-#   · `.mcp.json`, `.cursor/`, `.cursorrules`, `.windsurfrules`, `.roomodes`,
+#   · `.cursor/`, `.cursorrules`, `.windsurfrules`, `.roomodes`,
 #     `.clinerules`, `.aider.conf.yml`, `.codex/`, `.gemini/`, `.kiro/` —
 #     configuration. An agent's config is as legitimate as an editor's.
+#   · `mcp.json` and `.mcp.json` — not here, and not allowed either. Since
+#     2026-10-14 the gate's own mcp.json check refuses any commit that adds or
+#     modifies one, at any path, because a server definition carries tokens.
+#     It reads the range, not the tree, so a deletion or a rename clears it.
 #   · `CLAUDE.md` `AGENTS.md` `GEMINI.md` — project documentation.
 #   · `.vscode/` `.idea/` `.zed/` `.devcontainer/` — not agent files at all.
 #

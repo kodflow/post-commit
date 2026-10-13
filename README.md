@@ -18,6 +18,7 @@ on GitHub, against commits that already exist. There is nothing to skip.
 | **Format** | the commits this push/PR introduces (merges skipped) | a subject is not `type(scope)!: subject` with a conventional type |
 | **Secrets** | lines this push/PR *adds*, outside test/fixture paths | a line looks like a credential (AWS key, GitHub token, private-key header, a quoted `password` assignment, …) |
 | **Agent artefacts** | **every path tracked in the tree at the head** | an agent's *output* is committed: `.claude/logs/`, `.claude/plans/`, `.claude/.credentials.json`, `settings.local.json`, `.aider.chat.history.md`, `.specstory/history/`, session/cache/lock files. An agent's *configuration* is source and never matches |
+| **mcp.json** | **every non-merge commit** this push/PR introduces | a commit adds or modifies a file named `mcp.json` or `.mcp.json`, at any path. Not switchable. Deleting it, or renaming it to another name, passes |
 
 Default attribution patterns match the **shape of an attribution**, not the
 mention of a vendor. Measured on `devcontainer-template`'s real history, a
@@ -72,7 +73,7 @@ Set `history: range` to only check the commits a push/PR introduces.
 ### Agent artefacts: configuration is source, exhaust is not
 
 An agent's configuration is **source**. `.claude/agents/`, `.claude/commands/`,
-`.claude/skills/`, `.mcp.json`, `.cursor/rules/`, `.clinerules` — someone
+`.claude/skills/`, `.cursor/rules/`, `.clinerules` — someone
 authored those, reviewed them, and wants them shared with the next person to
 clone the repository. Refusing them would be refusing the work.
 
@@ -100,7 +101,7 @@ as long as the file is tracked.
 
 **Not matched, by decision rather than by omission**: an agent's configuration
 — `.claude/agents/`, `commands/`, `skills/`, `docs/`, `scripts/`,
-`settings.json`, `.mcp.json`, `.cursorrules`, `.cursor/rules/`, `.clinerules`,
+`settings.json`, `.cursorrules`, `.cursor/rules/`, `.clinerules`,
 `.aider.conf.yml` — plus the two measured cases above, editor configuration
 (`.vscode/`, `.idea/`, `.zed/`), `.devcontainer/`, and markdown instructions
 (`CLAUDE.md`, `AGENTS.md`, `GEMINI.md`). Nothing is matched *because* it sits
@@ -126,6 +127,40 @@ git commit -m "chore: untrack the session logs"
 The files stay on your machine; the repository stops carrying them. Nothing
 walks the ancestry, so that single commit ends it — unlike an attribution,
 which lives in a commit and needs `scripts/rewrite-history.sh`.
+
+### mcp.json, never
+
+No file named `mcp.json` or `.mcp.json` is ever committed, at any path
+(decision of 2026-10-14). An MCP server definition is a command line and an
+environment, and the environment is where the token goes. The check has no
+input to turn it off.
+
+It reads **every non-merge commit of the range**, with
+`git diff-tree --name-status`, not the diff between the range's two ends. A
+token added in one commit and removed in the next leaves the ends identical
+and the token in the history, so a removal on top does not clear the commit
+that added it. Only additions and modifications are refused, and a rename is
+judged by its destination:
+
+| Change in a commit | Verdict |
+|---|---|
+| add `.mcp.json`, modify `sub/mcp.json`, rename `notes.json` → `.mcp.json` | refused |
+| delete `.mcp.json`, rename `.mcp.json` → `mcp.json.tmpl`, add `mymcp.json` | passes |
+
+On a refusal the pull request goes back into draft like any other, and the
+verdict says how to get out:
+
+```sh
+git rm --cached .mcp.json                      # in the commit that added it
+git commit --amend                             # or a fixup! and rebase --autosquash
+cp .mcp.json mcp.json.tmpl                     # tokens replaced by placeholders
+printf '%s\n' mcp.json .mcp.json >> .gitignore
+git push --force-with-lease
+```
+
+If the file ever held a real token, revoke it: the push already published it.
+The whole-repository scan (push, manual and scheduled runs) has no
+range, so like format and secrets it does not run this check.
 
 ## Install
 

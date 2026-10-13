@@ -31,16 +31,22 @@
 #                    caches, the credentials store, personal overrides. Its
 #                    CONFIGURATION is source and is never matched —
 #                    .claude/agents/, commands/, skills/, settings.json,
-#                    .mcp.json, .cursorrules. The tree and not the range: an
+#                    .cursorrules (`.mcp.json` is check 7's business). The
+#                    tree and not the range: an
 #                    artefact merged before the rule existed would otherwise
 #                    leave every later pull request clean while it sat there.
+#   7. mcp.json    — no commit of the range ADDS or MODIFIES a file named
+#                    `mcp.json` or `.mcp.json`, at any path. Those files carry
+#                    MCP server definitions, and a server definition is where
+#                    a token ends up. Not switchable. A deletion, or a rename
+#                    to another name, is the way out and always passes.
 #
 # Deliberately NOT here: lint/build/test. Every repo's own CI already runs
 # those server-side, so --no-verify never bypassed them in the first place.
 #
 # usage: post-commit.sh <head-rev> [<range>]
 #   head-rev  commit whose whole ancestry is scanned when PC_HISTORY=full
-#   range     A..B — scope of format/secrets, and of attribution when
+#   range     A..B — scope of format/secrets/mcp.json, and of attribution when
 #             PC_HISTORY=range. Omit for a history-only scan (local audit).
 #
 # exit 0 = clean · 1 = violations · 2 = usage/internal error
@@ -134,9 +140,9 @@ if [ -n "$AUTHORS" ]; then
 fi
 
 ATTR_FILE="$(mktemp)"; FMT_FILE="$(mktemp)"; SEC_FILE="$(mktemp)"; IDENT_FILE="$(mktemp)"
-TRAIL_FILE="$(mktemp)"; AGENT_FILE="$(mktemp)"; REPORT_BODY="$(mktemp)"
-trap 'rm -f "$ATTR_FILE" "$FMT_FILE" "$SEC_FILE" "$IDENT_FILE" "$TRAIL_FILE" "$AGENT_FILE" "$REPORT_BODY"' EXIT
-ATTR_N=0; ATTR_SCANNED=0; FMT_N=0; FMT_SCANNED=0; SEC_N=0; IDENT_N=0; TRAIL_N=0; AGENT_N=0
+TRAIL_FILE="$(mktemp)"; AGENT_FILE="$(mktemp)"; MCP_FILE="$(mktemp)"; REPORT_BODY="$(mktemp)"
+trap 'rm -f "$ATTR_FILE" "$FMT_FILE" "$SEC_FILE" "$IDENT_FILE" "$TRAIL_FILE" "$AGENT_FILE" "$MCP_FILE" "$REPORT_BODY"' EXIT
+ATTR_N=0; ATTR_SCANNED=0; FMT_N=0; FMT_SCANNED=0; SEC_N=0; IDENT_N=0; TRAIL_N=0; AGENT_N=0; MCP_N=0
 AGENT_ROOT_N=0
 
 # Identity trailers, whatever the case. An address here is as permanent as the
@@ -433,6 +439,46 @@ if [ "$AGENT_FILES" = "true" ]; then
     AGENT_ROOT_N="${#AGENT_ROOT_ORDER[@]}"
 fi
 
+# --- 5. mcp.json (range, every commit) --------------------------------------
+# An MCP server definition is a command line and an environment, and the
+# environment is where the token goes. Decided on 2026-10-14: no file named
+# `mcp.json` or `.mcp.json` is ever committed, whatever directory it sits in.
+#
+# EVERY commit of the range, not the diff between its ends. A token added in
+# one commit and removed in the next leaves the endpoints identical and the
+# token in the history, which is exactly where it must not be. Reading each
+# commit is also why the fix is to drop the file FROM the commit that added it
+# rather than to add a removal on top.
+#
+# Only additions and modifications are refused. A deletion is the cleanup, and
+# a rename's DESTINATION is what is judged, so `.mcp.json` -> `mcp.json.tmpl`
+# passes and `notes.txt` -> `.mcp.json` does not. Merges are skipped like the
+# format check skips them: what a merge brings in was added by a commit the
+# range already holds.
+#
+# -z and NUL all the way, as in the artefact check: without it git C-quotes a
+# path holding an unusual byte and the `(^|/)` boundary stops matching. The
+# whole-repository scope has no range and therefore no mcp.json check, like
+# format and secrets: it judges a change, not the archive.
+MCP_RE='(^|/)\.?mcp\.json$'
+if [ -n "$RANGE" ]; then
+    while IFS= read -r SHA; do
+        [ -z "$SHA" ] && continue
+        SUBJ="$(git log -1 --format=%s "$SHA")"
+        while IFS= read -r -d '' ST; do
+            P=""
+            case "$ST" in
+                R*|C*) IFS= read -r -d '' _old; IFS= read -r -d '' P ;;
+                D*)    IFS= read -r -d '' _old; continue ;;
+                *)     IFS= read -r -d '' P ;;
+            esac
+            [[ "${P,,}" =~ $MCP_RE ]] || continue
+            MCP_N=$((MCP_N + 1))
+            printf '%s\x1f%s\x1f%s\x1f%s\0' "$SHA" "${ST:0:1}" "$P" "$SUBJ" >> "$MCP_FILE"
+        done < <(git diff-tree -r --root --no-commit-id --name-status -z -M "$SHA")
+    done < <(git log --no-merges --format=%H "$RANGE" 2>/dev/null)
+fi
+
 # --- Report -----------------------------------------------------------------
 esc() { printf '%s' "$1" | sed 's/|/\\|/g; s/`/ʼ/g'; }
 # GitHub workflow-command property values are comma-separated and newline-
@@ -453,12 +499,12 @@ esc_prop() {
     else
         echo "Attribution: **$ATTR_SCANNED** commit(s) in \`$RANGE\`."
     fi
-    [ -n "$RANGE" ] && echo "Format: **$FMT_SCANNED** non-merge commit(s) in \`$RANGE\`. Secrets: added lines in \`$RANGE\`."
+    [ -n "$RANGE" ] && echo "Format: **$FMT_SCANNED** non-merge commit(s) in \`$RANGE\`. Secrets: added lines in \`$RANGE\`. mcp.json: every non-merge commit in \`$RANGE\`."
     [ "$AGENT_FILES" = "true" ] && echo "Agent artefacts: paths tracked at \`${TREE_REV:0:12}\`."
     echo ""
     if [ "$ATTR_N" -eq 0 ] && [ "$FMT_N" -eq 0 ] && [ "$SEC_N" -eq 0 ] && [ "$IDENT_N" -eq 0 ] \
-       && [ "$TRAIL_N" -eq 0 ] && [ "$AGENT_N" -eq 0 ]; then
-        echo "✅ Clean — allowed identities, no AI attribution, conventional subjects, no credentials added, no agent artefacts tracked."
+       && [ "$TRAIL_N" -eq 0 ] && [ "$AGENT_N" -eq 0 ] && [ "$MCP_N" -eq 0 ]; then
+        echo "✅ Clean — allowed identities, no AI attribution, conventional subjects, no credentials added, no agent artefacts tracked, no mcp.json committed."
     fi
     if [ "$TRAIL_N" -gt 0 ]; then
         echo "### ❌ Foreign identity in a trailer — $TRAIL_N commit(s)"
@@ -556,10 +602,37 @@ esc_prop() {
         echo "> not the ancestry, so one commit clears it."
         echo ">"
         echo "> The agent's **configuration is source and is never matched**:"
-        echo "> \`.claude/agents/\`, \`commands/\`, \`skills/\`, \`settings.json\`, \`.mcp.json\`,"
+        echo "> \`.claude/agents/\`, \`commands/\`, \`skills/\`, \`settings.json\`,"
         echo "> \`.cursorrules\` — and editor config and \`CLAUDE.md\` alongside them."
         echo "> Only the listed runtime directories and filenames are refused, wherever"
         echo "> they sit. \`agent_files_allow\` exempts a path if one is genuinely wanted."
+        echo ""
+    fi
+    if [ "$MCP_N" -gt 0 ]; then
+        echo "### ❌ mcp.json committed — $MCP_N change(s)"
+        echo ""
+        echo "A file named \`mcp.json\` or \`.mcp.json\` holds MCP server definitions,"
+        echo "and a server definition is where a token ends up. None is ever committed,"
+        echo "at any path. Every commit of the range is read, so a later commit that"
+        echo "removes the file does not clear the one that added it."
+        echo ""
+        echo "| Commit | Subject | Change | Path |"
+        echo "|---|---|---|---|"
+        shown=0
+        while IFS=$'\x1f' read -r -d '' sha st p subj; do
+            shown=$((shown + 1)); [ "$shown" -gt "$MAX_REPORT" ] && break
+            case "$st" in A) st=added ;; M) st=modified ;; R) st="renamed to" ;; C) st="copied to" ;; *) st=changed ;; esac
+            printf '| `%s` | %s | %s | `%s` |\n' "${sha:0:8}" "$(esc "$subj")" "$st" "$(esc "$(printf '%q' "$p")")"
+        done < "$MCP_FILE"
+        [ "$MCP_N" -gt "$MAX_REPORT" ] && echo "" && echo "_… and $((MCP_N - MAX_REPORT)) more._"
+        echo ""
+        echo "> Take the file out of the commit that introduced it, then push the branch"
+        echo "> again with \`git push --force-with-lease\`:"
+        echo "> \`git rm --cached <path>\` and \`git commit --amend\`, or a \`fixup!\` commit and"
+        echo "> \`git rebase -i --autosquash\` when it is further back."
+        echo "> Keep a shareable version as \`mcp.json.tmpl\`, every token replaced by a"
+        echo "> placeholder, and add \`mcp.json\` and \`.mcp.json\` to \`.gitignore\`."
+        echo "> **If the file ever held a real token, revoke it**: the push already published it."
         echo ""
     fi
 } > "$REPORT_BODY"
@@ -609,12 +682,23 @@ if [ "$AGENT_N" -gt 0 ]; then
     done < "$AGENT_FILE"
     echo "::error::$AGENT_N agent artefact file(s) tracked at ${TREE_REV:0:12} — no history rewrite needed, one commit removes them"
 fi
+if [ "$MCP_N" -gt 0 ]; then
+    RC=1
+    shown=0
+    while IFS=$'\x1f' read -r -d '' sha _st p _subj; do
+        shown=$((shown + 1)); [ "$shown" -gt "$MAX_REPORT" ] && break
+        echo "::error file=$(esc_prop "$p")::mcp.json committed in ${sha:0:8} — drop it from that commit (git rm --cached, then amend or fixup), keep mcp.json.tmpl, gitignore it"
+    done < "$MCP_FILE"
+    echo "::error::$MCP_N mcp.json addition(s) or modification(s) in $RANGE — never committed, at any path"
+fi
 
 if [ "$RC" -eq 0 ]; then
     # PC_AGENT_FILES is "true" or "false" — both non-empty, so the claim is
     # built from whether the check ran, not from the flag's truthiness.
     AGENT_CLAIM=""
     [ "$AGENT_FILES" = "true" ] && AGENT_CLAIM=", no agent artefacts tracked"
-    echo "✅ post-commit: $ATTR_SCANNED commit(s) attribution-free${IDENT_RE:+ and correctly attributed}, $FMT_SCANNED subject(s) conventional, no credentials added${AGENT_CLAIM}"
+    MCP_CLAIM=""
+    [ -n "$RANGE" ] && MCP_CLAIM=", no mcp.json committed"
+    echo "✅ post-commit: $ATTR_SCANNED commit(s) attribution-free${IDENT_RE:+ and correctly attributed}, $FMT_SCANNED subject(s) conventional, no credentials added${AGENT_CLAIM}${MCP_CLAIM}"
 fi
 exit "$RC"
