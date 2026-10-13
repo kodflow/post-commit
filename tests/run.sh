@@ -225,6 +225,13 @@ else FAIL=$((FAIL+1)); echo "  FAIL legacy reader and commit scope differ"; fi
 
 pd="$(mktemp -d)"; printf '# @scope: commit,prr\nfoo\n' > "$pd/patterns.txt"
 PC_PATTERNS_DIR="$pd" pcheck "a typo in a directive fails loudly" 2 "foo" check --scope commit
+printf '# @scope: commit,\nfoo\n' > "$pd/patterns.txt"
+PC_PATTERNS_DIR="$pd" pcheck "a trailing comma in a directive fails loudly" 2 "foo" check --scope commit
+printf 'foo\n(unclosed\n' > "$pd/patterns.txt"
+PC_PATTERNS_DIR="$pd" pcheck "a broken ERE fails list" 2 "" list --scope commit
+PC_PATTERNS_DIR="$pd" pcheck "...and check, even after an earlier match" 2 "foo" check --scope commit
+big="$(printf 'Co-authored-by: Claude <x@y>\n'; head -c 2000000 /dev/zero | tr '\0' 'a')"
+pcheck "an early match in a large text is a match, not an error" 1 "$big" check --scope commit
 printf 'foo\n# @scope: pr\nbar\n' > "$pd/patterns.txt"
 PC_PATTERNS_DIR="$pd" pcheck "before the first directive the scope is commit" 0 "foo" check --scope pr
 PC_PATTERNS_DIR="$pd" pcheck "...and a directive scopes what follows it" 1 "bar" check --scope pr

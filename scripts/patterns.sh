@@ -38,7 +38,10 @@ pc_load_patterns() {
     while IFS= read -r line || [ -n "$line" ]; do
         if [[ "$line" =~ ^#[[:space:]]*@scope:[[:space:]]*(.*)$ ]]; then
             cur="${BASH_REMATCH[1]//[[:space:]]/}"
-            [ -n "$cur" ] || { echo "::error::$f: empty @scope directive" >&2; return 2; }
+            # Shape first: `read -a` drops a trailing empty field, so
+            # `commit,` would otherwise pass as `commit`.
+            [[ "$cur" =~ ^[a-z]+(,[a-z]+)*$ ]] || {
+                echo "::error::$f: malformed @scope directive '$cur'" >&2; return 2; }
             local -a parts
             IFS=',' read -r -a parts <<< "$cur"
             for s in "${parts[@]}"; do
@@ -80,17 +83,27 @@ pc_patterns_main() {
         return 2
     fi
 
+    # Every selected ERE is compiled up front: `list` would otherwise hand a
+    # broken rule to its consumer with exit 0, and `check` would only notice
+    # it if no earlier pattern matched first.
+    local p rc
+    for p in "${pats[@]}"; do
+        grep -qE -- "$p" </dev/null; rc=$?
+        [ "$rc" -le 1 ] || { echo "::error::invalid pattern: $p" >&2; return 2; }
+    done
+
     if [ "$cmd" = list ]; then
         printf '%s\n' "${pats[@]}"
         return 0
     fi
-    local text p hit rc
+    local text hit
     text="$(cat)"
     for p in "${pats[@]}"; do
-        hit="$(printf '%s\n' "$text" | grep -iE -m1 -- "$p")"; rc=$?
-        # grep's 2 is a broken pattern, not a miss: a rule that cannot match
-        # must not be read as a clean verdict.
-        [ "$rc" -le 1 ] || { echo "::error::invalid pattern: $p" >&2; return 2; }
+        # A here-string, not a pipe: `grep -m1` stops reading at its first
+        # match, and a producer writing a large text into a closed pipe would
+        # die of SIGPIPE and turn a match into a pipeline failure.
+        hit="$(grep -iE -m1 -- "$p" <<< "$text")"; rc=$?
+        [ "$rc" -le 1 ] || { echo "::error::grep failed on pattern: $p" >&2; return 2; }
         if [ "$rc" -eq 0 ]; then
             printf '%s\t%s\n' "$p" "$(printf '%s' "$hit" | cut -c1-120)"
             return 1
