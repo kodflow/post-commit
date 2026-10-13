@@ -18,7 +18,7 @@ on GitHub, against commits that already exist. There is nothing to skip.
 | **Format** | the commits this push/PR introduces (merges skipped) | a subject is not `type(scope)!: subject` with a conventional type |
 | **Secrets** | lines this push/PR *adds*, outside test/fixture paths | a line looks like a credential (AWS key, GitHub token, private-key header, a quoted `password` assignment, …) |
 | **Agent artefacts** | **every path tracked in the tree at the head** | an agent's *output* is committed: `.claude/logs/`, `.claude/plans/`, `.claude/.credentials.json`, `settings.local.json`, `.aider.chat.history.md`, `.specstory/history/`, session/cache/lock files. An agent's *configuration* is source and never matches |
-| **mcp.json** | **every non-merge commit** this push/PR introduces | a commit adds or modifies a file named `mcp.json` or `.mcp.json`, at any path. Not switchable. Deleting it, or renaming it to another name, passes |
+| **mcp.json** | **every non-merge commit** of the range a PR introduces (no range, as on the whole-repository scan: not run) | a commit adds or modifies a file named `mcp.json` or `.mcp.json`, at any path. Not switchable. Deleting it, or renaming it to another name, passes |
 
 Default attribution patterns match the **shape of an attribution**, not the
 mention of a vendor. Measured on `devcontainer-template`'s real history, a

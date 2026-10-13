@@ -504,7 +504,8 @@ esc_prop() {
     echo ""
     if [ "$ATTR_N" -eq 0 ] && [ "$FMT_N" -eq 0 ] && [ "$SEC_N" -eq 0 ] && [ "$IDENT_N" -eq 0 ] \
        && [ "$TRAIL_N" -eq 0 ] && [ "$AGENT_N" -eq 0 ] && [ "$MCP_N" -eq 0 ]; then
-        echo "✅ Clean — allowed identities, no AI attribution, conventional subjects, no credentials added, no agent artefacts tracked, no mcp.json committed."
+        # Only a range is read for mcp.json, so only a range may claim it.
+        echo "✅ Clean — allowed identities, no AI attribution, conventional subjects, no credentials added, no agent artefacts tracked${RANGE:+, no mcp.json committed}."
     fi
     if [ "$TRAIL_N" -gt 0 ]; then
         echo "### ❌ Foreign identity in a trailer — $TRAIL_N commit(s)"

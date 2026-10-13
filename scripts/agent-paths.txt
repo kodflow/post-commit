@@ -41,7 +41,10 @@
 #   · `mcp.json` and `.mcp.json` — not here, and not allowed either. Since
 #     2026-10-14 the gate's own mcp.json check refuses any commit that adds or
 #     modifies one, at any path, because a server definition carries tokens.
-#     It reads the range, not the tree, so a deletion or a rename clears it.
+#     It reads every commit of the range, not the tree: a deletion or a rename
+#     to another name passes as its own commit, but does not clear an earlier
+#     commit of the range that added or modified one. That commit has to be
+#     rewritten.
 #   · `CLAUDE.md` `AGENTS.md` `GEMINI.md` — project documentation.
 #   · `.vscode/` `.idea/` `.zed/` `.devcontainer/` — not agent files at all.
 #
