@@ -5,6 +5,10 @@
 # the last 60 legitimate commit messages ("fix: update .claude/scripts/…").
 # Enable on repos where a commit message has no legitimate reason to mention
 # the tooling.
+#
+# Commit scope only (see the SCOPE note in patterns.txt): a pull request that
+# is about Claude Code has to be able to say so.
+# @scope: commit
 claude[-[:space:]]code
 \bclaude\b
 \banthropic\b

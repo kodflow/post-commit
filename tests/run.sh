@@ -156,6 +156,80 @@ check "'claude code' fails under strict" 1 "$d" PC_STRICT=true
 d=$(mkrepo); commit_msg "$d" "fix: handle .claude/ lookups"
 check "'.claude/' fails under strict" 1 "$d" PC_STRICT=true
 
+echo "== attribution shapes =="
+d=$(mkrepo); commit_msg "$d" "feat: thing
+
+Co-AuThOrEd-By: cLaUdE <someone@example.com>"
+check "'Co-authored-by' in mixed case" 1 "$d"
+
+d=$(mkrepo); commit_msg "$d" "feat: thing 🤖"
+check "robot emoji alone, no banner" 1 "$d"
+
+# The shape an agent actually writes: a message passed through a QUOTED
+# heredoc, so nothing in it is expanded and the trailer reaches git verbatim.
+d=$(mkrepo); echo x > "$d/f.txt"; git -C "$d" add -A
+git -C "$d" commit -q -F - <<'EOF'
+feat: thing
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+EOF
+check "trailer written through a quoted heredoc" 1 "$d"
+
+echo "== pattern scopes (scripts/patterns.sh) =="
+PATS="$ROOT/scripts/patterns.sh"
+# pcheck <name> <expected-exit> <text> [patterns.sh args...]
+pcheck() {
+    local name="$1" want="$2" text="$3"; shift 3
+    local out rc
+    out="$(printf '%s' "$text" | bash "$PATS" "$@" 2>&1)"; rc=$?
+    if [ "$rc" -eq "$want" ]; then
+        PASS=$((PASS+1)); printf '  ok   %s\n' "$name"
+    else
+        FAIL=$((FAIL+1)); printf '  FAIL %s (want exit %s, got %s)\n%s\n' "$name" "$want" "$rc" "$(printf '%s' "$out" | sed 's/^/       /')"
+    fi
+}
+# The raw Bash command, as a PreToolUse hook sees it before git runs: the
+# trailer sits at the start of its own line inside the heredoc body.
+RAW_CMD="git commit -m \"\$(cat <<'EOF'
+feat: thing
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+EOF
+)\""
+pcheck "quoted heredoc in a raw command: refused for a commit" 1 "$RAW_CMD" check --scope commit
+pcheck "mixed-case trailer: refused in a PR body too" 1 "Body.
+
+co-AUTHORED-by: Claude <x@y>" check --scope pr
+pcheck "robot emoji: refused in a PR body" 1 "Done 🤖" check --scope pr
+pcheck "'.claude/' in a PR body: allowed, even strict" 0 "Moves .claude/plans out of the tree" check --scope pr --strict
+pcheck "'.claude/' in a commit: refused under strict" 1 "fix: move .claude/plans out" check --scope commit --strict
+pcheck "'Claude Code' in a PR title: allowed, even strict" 0 "feat: support Claude Code hooks" check --scope pr --strict
+pcheck "'Plan:' footer: refused in a commit" 1 "feat: x
+
+Plan: thing" check --scope commit
+pcheck "'Plan:' line: allowed in a PR body" 0 "Plan: ship it in two steps" check --scope pr
+pcheck "no --scope is a usage error" 2 "x" check
+pcheck "unknown scope is a usage error" 2 "x" check --scope issue
+
+# Every pattern a PR is held to is also held against a commit: the PR scope
+# is a subset, never a separate rule set.
+pr_only="$(comm -23 <(bash "$PATS" list --scope pr --strict | sort) <(bash "$PATS" list --scope commit --strict | sort))"
+if [ -z "$pr_only" ]; then PASS=$((PASS+1)); echo "  ok   pr scope is a subset of commit scope"
+else FAIL=$((FAIL+1)); printf '  FAIL pattern in pr scope only:\n%s\n' "$pr_only"; fi
+
+# A reader that predates scopes (every non-comment line is a pattern) gets
+# exactly the commit scope: the directive did not change what it reads.
+legacy="$(grep -hvE '^(#|$)' "$ROOT/scripts/patterns.txt")"
+if [ "$legacy" = "$(bash "$PATS" list --scope commit)" ]; then PASS=$((PASS+1)); echo "  ok   legacy reader sees the commit scope unchanged"
+else FAIL=$((FAIL+1)); echo "  FAIL legacy reader and commit scope differ"; fi
+
+pd="$(mktemp -d)"; printf '# @scope: commit,prr\nfoo\n' > "$pd/patterns.txt"
+PC_PATTERNS_DIR="$pd" pcheck "a typo in a directive fails loudly" 2 "foo" check --scope commit
+printf 'foo\n# @scope: pr\nbar\n' > "$pd/patterns.txt"
+PC_PATTERNS_DIR="$pd" pcheck "before the first directive the scope is commit" 0 "foo" check --scope pr
+PC_PATTERNS_DIR="$pd" pcheck "...and a directive scopes what follows it" 1 "bar" check --scope pr
+rm -rf "$pd"
+
 echo "== identity =="
 # The allowlist is opt-in: an empty PC_AUTHORS must not fail a repo that
 # never asked for the rule (every case above runs with dev@example.com).

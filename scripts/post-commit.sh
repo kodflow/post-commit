@@ -83,20 +83,18 @@ fi
 
 # --- Patterns ---------------------------------------------------------------
 # Comments and blank lines stripped. Case-insensitivity is applied once, by
-# the runner, instead of being baked into each pattern.
+# the runner, instead of being baked into each pattern. The reader is
+# patterns.sh, shared with every other consumer of these files; the gate reads
+# commits, so it takes the `commit` scope.
+# shellcheck source=scripts/patterns.sh
+. "$SCRIPT_DIR/patterns.sh"
 PATTERNS=()
 AGENT_PATTERNS=()
-load_patterns() {   # load_patterns <file> [<array-name>]
-    local f="$1" line
-    local -n dest="${2:-PATTERNS}"
-    [ -r "$f" ] || { echo "::error::pattern file not readable: $f" >&2; exit 2; }
-    while IFS= read -r line || [ -n "$line" ]; do
-        case "$line" in ''|'#'*) continue ;; esac
-        dest+=("$line")
-    done < "$f"
+load_patterns() {   # load_patterns <file> [<array-name>] [<scope>]
+    pc_load_patterns "$1" "${2:-PATTERNS}" "${3:-}" || exit 2
 }
-load_patterns "$SCRIPT_DIR/patterns.txt"
-[ "$STRICT" = "true" ] && load_patterns "$SCRIPT_DIR/patterns-strict.txt"
+load_patterns "$SCRIPT_DIR/patterns.txt" PATTERNS commit
+[ "$STRICT" = "true" ] && load_patterns "$SCRIPT_DIR/patterns-strict.txt" PATTERNS commit
 if [ "${#PATTERNS[@]}" -eq 0 ]; then
     echo "::error::no patterns loaded — refusing to report a false clean" >&2
     exit 2

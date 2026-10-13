@@ -441,6 +441,65 @@ clone must be re-cloned, and there is no undo.
 GitHub keeps the old commits reachable by URL for a while; only support can
 purge them. Run it one repository at a time, on purpose.
 
+## Reading the patterns from elsewhere
+
+`scripts/patterns.txt` and `scripts/patterns-strict.txt` are the single list of
+what an attribution looks like. A local `commit-msg` hook, an agent's
+`PreToolUse` hook or a pull-request title check should read them rather than
+keep a copy that drifts.
+
+### Format
+
+```
+# a comment, ignored; blank lines too
+# @scope: commit,pr
+^[[:space:]]*(co-authored-by|assisted-by|…)[[:space:]]*:.*(claude|anthropic|…)
+noreply@anthropic\.com
+# @scope: commit
+^[[:space:]]*plan:[[:space:]]
+```
+
+- One POSIX ERE per line, matched **case-insensitively** and **line by line**
+  against the text (`grep -iE` semantics; `\b` is used, so the GNU dialect).
+- `# @scope: <list>` sets the scope of every pattern below it, up to the next
+  directive. `commit` = a commit message plus its author and committer
+  identity. `pr` = a pull request's title and body. Before the first
+  directive, the scope is `commit`. An unknown scope is an error, not a skip.
+- What a PR is held to is the **attribution** patterns only: trailers naming an
+  assistant, "Generated with …", the robot emoji, `noreply@anthropic.com`,
+  "AI-assisted". The workflow-leak `Plan:` footer and every strict keyword
+  (`claude code`, `.claude/`) are `commit` only, so a PR can still talk about
+  the tooling.
+- The directive is a comment. A reader that predates it, taking every
+  non-comment line as a pattern, gets exactly the `commit` scope (a test pins
+  this). Today the only reader is this repository's gate.
+
+### Pin a ref, then read
+
+Pin a commit, never `main`: a consumer that runs on every developer machine
+must not change behaviour because this repository moved.
+
+```bash
+REF=<40-hex commit of kodflow/post-commit>
+base="https://raw.githubusercontent.com/kodflow/post-commit/$REF/scripts"
+curl -fsSL "$base/patterns.txt"        -o patterns.txt
+curl -fsSL "$base/patterns-strict.txt" -o patterns-strict.txt
+```
+
+Then either reimplement the three rules above, or use the reference reader,
+which lives next to the files and reads them from its own directory:
+
+```bash
+curl -fsSL "$base/patterns.sh" -o patterns.sh
+bash patterns.sh list  --scope pr                    # one ERE per line
+bash patterns.sh check --scope commit --strict < msg # 0 clean, 1 matched, 2 error
+```
+
+`check` prints `<pattern>\t<matching line>` on a match. An empty pattern list,
+an unreadable file or a broken ERE exit 2: a reader that silently matches
+nothing must never be mistaken for a clean verdict. Moving the pin is a
+reviewed change in the consumer, like the `block-merge` pin.
+
 ## Layout
 
 ```
@@ -450,6 +509,7 @@ scripts/bump-block-merge.sh   move that pin in the stub
 scripts/post-commit.sh        the gate
 scripts/patterns.txt          default forbidden patterns (attribution-shaped)
 scripts/patterns-strict.txt   opt-in keyword patterns
+scripts/patterns.sh           reference reader of both: scopes (commit, pr), list, check
 scripts/agent-paths.txt       agent RUNTIME paths (logs, transcripts, caches); config kept
 scripts/enforce.sh            fleet: stub PR + ruleset + runner-template stubs, idempotent
 scripts/bump-runner-template.sh  move every runner-template stub to one kodflow/runner-template commit
