@@ -519,9 +519,8 @@ echo "== agent artefacts: configuration is source, exhaust is not =="
 d=$(mkrepo); mkdir -p "$d/.claude/agents" "$d/.claude/commands" "$d/.claude/skills"
 echo '{}' > "$d/.claude/settings.json"; echo '# a' > "$d/.claude/agents/reviewer.md"
 echo '# c' > "$d/.claude/commands/ship.md"; echo '# s' > "$d/.claude/skills/deploy.md"
-echo '{}' > "$d/.mcp.json"
 git -C "$d" add -A; git -C "$d" commit -qm "chore: agent configuration"
-check "settings, agents, commands, skills and .mcp.json are source" 0 "$d"
+check "settings, agents, commands and skills are source" 0 "$d"
 
 # Both of these are real fleet content, and both would fall to a lazier rule:
 # routing-table.jsonl to "a .jsonl under an agent directory is a log" (tracked
@@ -651,7 +650,7 @@ ALLOWED=(
     .claude/scripts/hook.sh .claude/templates/t.tpl .claude/workflows/w.yml
     .claude/settings.json .claude/.claude.json .claude/features.json
     .claude/sessions/.gitkeep .claude/db
-    .mcp.json .cursorrules .cursor/rules/style.mdc
+    .cursorrules .cursor/rules/style.mdc
     .aider.conf.yml .aider.model.settings.yml .aider.model.metadata.json
     .roomodes .clinerules .windsurfrules .codex/config.toml .gemini/settings.json
     CLAUDE.md AGENTS.md GEMINI.md
@@ -799,6 +798,58 @@ fi
 # Everything those cannot reach — choosing an override, reading visibility,
 # downloading the deployed file, what --apply writes and to whom — runs here,
 # through the real script, with tests/fake-gh.sh standing in for the API.
+echo "== mcp.json: never added or modified, at any path =="
+# A file named mcp.json or .mcp.json carries MCP server definitions, and a
+# token with them. Every commit of the range is read; leaving is always allowed.
+d=$(mkrepo); echo '{}' > "$d/.mcp.json"
+git -C "$d" add -A; git -C "$d" commit -qm "chore: add mcp config"
+check "adding .mcp.json is refused" 1 "$d"
+
+d=$(mkrepo); mkdir -p "$d/sub"; echo '{}' > "$d/sub/mcp.json"
+git -C "$d" add -A; git -C "$d" commit -qm "chore: preexisting mcp config"
+echo '{"a":1}' > "$d/sub/mcp.json"; git -C "$d" add -A; git -C "$d" commit -qm "chore: edit mcp config"
+check "modifying sub/mcp.json is refused" 1 "$d"
+
+d=$(mkrepo); echo '{}' > "$d/.mcp.json"
+git -C "$d" add -A; git -C "$d" commit -qm "chore: preexisting mcp config"
+git -C "$d" rm -q .mcp.json; git -C "$d" commit -qm "chore: remove mcp config"
+check "deleting .mcp.json is allowed" 0 "$d"
+
+d=$(mkrepo); echo '{"mcpServers":{}}' > "$d/.mcp.json"
+git -C "$d" add -A; git -C "$d" commit -qm "chore: preexisting mcp config"
+git -C "$d" mv .mcp.json mcp.json.tmpl; git -C "$d" commit -qm "chore: keep a template"
+check "renaming .mcp.json to mcp.json.tmpl is allowed" 0 "$d"
+
+d=$(mkrepo); echo '{}' > "$d/mymcp.json"
+git -C "$d" add -A; git -C "$d" commit -qm "chore: unrelated json"
+check "mymcp.json is not an mcp.json" 0 "$d"
+
+# The reverse rename lands a file under the forbidden name.
+d=$(mkrepo); echo '{"mcpServers":{}}' > "$d/notes.json"
+git -C "$d" add -A; git -C "$d" commit -qm "chore: preexisting notes"
+git -C "$d" mv notes.json .mcp.json; git -C "$d" commit -qm "chore: rename to mcp"
+check "renaming a file TO .mcp.json is refused" 1 "$d"
+
+# Added then removed inside the range: the ends are identical, the history is
+# not. Every commit is read, so the removal does not clear the addition.
+d=$(mkrepo); BASE=$(git -C "$d" rev-parse HEAD)
+mkdir -p "$d/a/b"; echo '{}' > "$d/a/b/MCP.json"; git -C "$d" add -A; git -C "$d" commit -qm "chore: add"
+git -C "$d" rm -q a/b/MCP.json; git -C "$d" commit -qm "chore: remove"
+RANGE_SPEC="$BASE..HEAD"
+check "added then removed within the range is still refused" 1 "$d"
+
+d=$(mkrepo); echo '{}' > "$d/.mcp.json"
+git -C "$d" add -A; git -C "$d" commit -qm "chore: add mcp config"
+r="$(mktemp)"
+out="$(cd "$d" && env GITHUB_STEP_SUMMARY=/dev/null PC_REPORT="$r" bash "$GATE" HEAD HEAD~1..HEAD 2>&1)"; rc=$?
+if [ "$rc" -eq 1 ] && grep -qF 'git rm --cached' "$r" && grep -qF 'mcp.json.tmpl' "$r" \
+   && grep -qF '.gitignore' "$r" && printf '%s' "$out" | grep -qF '::error file=.mcp.json::'; then
+    PASS=$((PASS+1)); printf '  ok   %s\n' "the refusal says how to fix it and annotates the path"
+else
+    FAIL=$((FAIL+1)); printf '  FAIL %s (rc %s)\n%s\n%s\n' "the refusal says how to fix it and annotates the path" "$rc" "$out" "$(cat "$r")"
+fi
+rm -rf "$d" "$r"
+
 echo "== enforce: selftest =="
 if out="$(bash "$ROOT/scripts/enforce.sh" --selftest 2>&1)"; then
     PASS=$((PASS+1)); printf '  ok   enforce.sh --selftest\n'

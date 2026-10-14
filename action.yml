@@ -6,8 +6,8 @@ name: post-commit
 description: >-
   Mandatory merge gate: every commit authored by an allowed account, no AI
   attribution anywhere in history, no agent session exhaust tracked in the
-  tree, conventional commit subjects, no credentials added. Logic lives in
-  kodflow/post-commit —
+  tree, conventional commit subjects, no credentials added, no mcp.json
+  committed. Logic lives in kodflow/post-commit —
   callers pin @main so a fix there is live everywhere on the next run.
 branding:
   icon: shield
@@ -42,10 +42,12 @@ inputs:
       .claude/logs/, .claude/plans/, settings.local.json, .aider.chat.history.md,
       .specstory/history/, session and cache directories (full list:
       scripts/agent-paths.txt). An agent's CONFIGURATION is source and is never
-      matched: .claude/agents/, commands/, skills/, settings.json, .mcp.json,
+      matched: .claude/agents/, commands/, skills/, settings.json,
       .cursorrules and the rest. The tree at the head is what is read, not the
       range, so the check stays red until the exhaust is gone; one `git rm
-      --cached` clears it, no history rewrite.
+      --cached` clears it, no history rewrite. `mcp.json` and `.mcp.json` are
+      a separate check with no switch: no commit of the range may add or
+      modify one, at any path.
     default: 'true'
   agent_files_allow:
     description: >-
