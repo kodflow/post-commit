@@ -36,9 +36,11 @@ jobs:
       report_prefix: ktn-native-
       # macos-arm64: the licence package on Apple Silicon; macos-amd64: the
       # same binary on an Intel kernel; windows-amd64: the licence package and
-      # the daemon's Windows instance-lock tests (`-run Windows`).
+      # the daemon's Windows instance-lock tests (`-run Windows`). On every
+      # leg, the worker processes' memory ceiling (kodflow/ktn-linter#789):
+      # the `Darwin` / `Windows` tests of pkg/workerpool.
       legs: >-
-        [{"leg":"macos-arm64","runner":"macos-latest","artifact":"license-tests-darwin","dir":"darwin-arm64","specs":"license.test"},{"leg":"macos-amd64","runner":"macos-15-intel","artifact":"license-tests-darwin","dir":"darwin-amd64","specs":"license.test"},{"leg":"windows-amd64","runner":"windows-latest","artifact":"license-tests-windows","dir":"windows-amd64","specs":"license.test.exe serve.test.exe:Windows"}]
+        [{"leg":"macos-arm64","runner":"macos-latest","artifact":"license-tests-darwin","dir":"darwin-arm64","specs":"license.test workerpool.test:Darwin"},{"leg":"macos-amd64","runner":"macos-15-intel","artifact":"license-tests-darwin","dir":"darwin-amd64","specs":"license.test workerpool.test:Darwin"},{"leg":"windows-amd64","runner":"windows-latest","artifact":"license-tests-windows","dir":"windows-amd64","specs":"license.test.exe serve.test.exe:Windows workerpool.test.exe:Windows"}]
     # By name, or the called workflow cannot read it (inherit does not cross
     # owners). Empty here: the key lives only in the private-source
     # environment, which the called jobs name and GitHub reads it from.
