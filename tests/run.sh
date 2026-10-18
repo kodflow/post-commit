@@ -1264,6 +1264,17 @@ eok "current, an obsolete sync open, --apply: closed" $?
 grep -q -- "^pr close $OPEN --repo someone-else/some-repo .*--delete-branch" "$fx/calls.log"; eok "...with its branch deleted" $?
 grep -q 'rule=synced' <<< "$EOUT"; eok "...and the ruleset still reconciled" $?
 
+# A fork's pull request from a branch that happens to be named chore/post-commit
+# is not a sync: never closed, never written to.
+fx="$(sfx "$STUB" -)"; mv "$fx/someone-else/some-repo/open_pr" "$fx/someone-else/some-repo/open_pr.fork"
+EOUT="$(erun "$fx" --apply someone-else/some-repo)"
+grep -q 'stub=present ' <<< "$EOUT" && [ ! -e "$fx/someone-else/some-repo/pr.closed" ]
+eok "current, a fork's pull request on a same-named branch: left alone" $?
+fx="$(sfx "$OLDSTUB" -)"; mv "$fx/someone-else/some-repo/open_pr" "$fx/someone-else/some-repo/open_pr.fork"
+EOUT="$(erun "$fx" --apply someone-else/some-repo)"
+grep -q 'stub=sync-created ' <<< "$EOUT" && [ "$(cat "$fx/someone-else/some-repo/put.branch")" = chore/post-commit ]
+eok "drift, only a fork's pull request open: our own sync is opened" $?
+
 fx="$(sfx "$OLDSTUB" "$OLDSTUB")"; EOUT="$(erun "$fx" someone-else/some-repo)"
 grep -q 'stub=stale:pr-would-update ' <<< "$EOUT"; eok "drift, a sync open on an older stub, dry-run: would update it" $?
 ! grep -qE -- '-X PUT|^pr create' "$fx/calls.log"; eok "...and writes nothing" $?
@@ -1276,7 +1287,7 @@ grep -q 'rule=synced' <<< "$EOUT"; eok "...and the ruleset reconciled: the stub 
 
 fx="$(sfx "$OLDSTUB" "$STUB")"; EOUT="$(erun "$fx" --apply someone-else/some-repo)"
 grep -q 'stub=stale:pr-open ' <<< "$EOUT"; eok "drift, a sync open that is already current: left as it is" $?
-! grep -q -- '-X PUT' "$fx/calls.log"; eok "...nothing written" $?
+! grep -q -- 'contents/[^ ]* -X PUT' "$fx/calls.log"; eok "...nothing written" $?
 
 fx="$(sfx - "$OLDSTUB")"; EOUT="$(erun "$fx" --apply someone-else/some-repo)"
 grep -q 'stub=pr-open:updated ' <<< "$EOUT"; eok "no stub yet, its pull request on an older stub: updated" $?
@@ -1389,7 +1400,9 @@ if [ $# -eq 1 ] && [ "${1##*/}" = selftest.yml ]; then rc=0; else rc=1; fi; eok 
 fx="$(rtfx supervizio public)"; mkdir -p "$fx/supervizio/runner-template/rt-fail"; : > "$fx/supervizio/runner-template/rt-fail/sweep.yml"
 EOUT="$(erun "$fx" --apply supervizio/runner-template)"; rc=$?
 grep -q 'runner-template-stubs=error:read:sweep.yml' <<< "$EOUT"; eok "a stub read failing with a 502: an error, not drift" $?
-! grep -qE -- 'workflows/[a-z-]+\.yml -X PUT|git/refs -X POST|^pr (create|list)' "$fx/calls.log"; eok "...no branch, no write, no pull request" $?
+# The gate's own lookup of an open sync (chore/post-commit) is expected; the
+# runner-template's is not, the read having failed before it.
+! grep -qE -- 'workflows/[a-z-]+\.yml -X PUT|git/refs -X POST|^pr create|^pr list .*--head chore/runner-template' "$fx/calls.log"; eok "...no branch, no write, no pull request" $?
 eok "...and the run exits 1" $(( rc == 1 ? 0 : 1 ))
 
 # A failed pull-request lookup is not "none open": that would open a second.

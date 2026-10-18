@@ -13,6 +13,8 @@
 #   workflow.yml    the deployed .github/workflows/post-commit.yml; absent: 404
 #   content_fails   present: downloading that file's content fails
 #   open_pr         a URL: an open pull request exists on the enforce branch
+#   open_pr.fork    a URL: an open pull request from a FORK's branch of the same
+#                   name (listed before open_pr, as cross-repository)
 #   branch.yml      the post-commit.yml that branch (chore/post-commit) carries;
 #                   absent: 404
 #
@@ -84,8 +86,12 @@ case "$sub" in
                 if [ "$head" = chore/runner-template ]; then
                     if [ -s "$D/$repo/open_pr.rt" ]; then out "$(jq -n --arg u "$(cat "$D/$repo/open_pr.rt")" '[{url:$u}]')"
                     else out '[]'; fi
-                elif [ -s "$D/$repo/open_pr" ]; then out "$(jq -n --arg u "$(cat "$D/$repo/open_pr")" '[{url:$u}]')"
-                else out '[]'; fi ;;
+                else
+                    list='[]'
+                    [ -s "$D/$repo/open_pr.fork" ] && list="$(jq -c --arg u "$(cat "$D/$repo/open_pr.fork")" '. + [{url:$u, isCrossRepository:true}]' <<< "$list")"
+                    [ -s "$D/$repo/open_pr" ] && list="$(jq -c --arg u "$(cat "$D/$repo/open_pr")" '. + [{url:$u, isCrossRepository:false}]' <<< "$list")"
+                    out "$list"
+                fi ;;
             create)
                 if [ "$head" = chore/runner-template ]; then printf '%s' "$body" > "$D/$repo/rt-pr.body"
                 else printf '%s' "$body" > "$D/$repo/pr.body"; fi

@@ -427,9 +427,13 @@ ensure_stub() {   # -> sets STUB_STATE, PR_URL, STUB_NOTE
     # copy of the stub as it was when the PR was opened, and a stub that moved
     # since (kitsunium/sdk#345, which would have taken merge_group back out)
     # must not be left for someone to merge.
+    # --head matches a branch NAME, whoever's it is: a fork's pull request from
+    # its own chore/post-commit would come back too. Only one whose head is in
+    # this repository is ours to update or close.
     local pr_branch="" b lookup=ok
     for b in "$BRANCH" "${LEGACY_BRANCHES[@]}"; do
-        PR_URL="$(gh pr list --repo "$repo" --head "$b" --state open --json url --jq '.[0].url // empty' 2>/dev/null)" \
+        PR_URL="$(gh pr list --repo "$repo" --head "$b" --state open --json url,isCrossRepository \
+                    --jq '[.[] | select(.isCrossRepository | not)][0].url // empty' 2>/dev/null)" \
             || { lookup=failed; PR_URL=""; break; }
         [ -n "$PR_URL" ] && { pr_branch="$b"; break; }
     done
@@ -566,7 +570,10 @@ ensure_rt_stubs() {   # ensure_rt_stubs <owner/repo> <default-branch> -> RT_STAT
 
     # A failed lookup is not "no pull request": read as one, it would open a
     # second sync next to the first.
-    RT_PR="$(gh pr list --repo "$repo" --head "$RT_BRANCH" --state open --json url --jq '.[0].url // empty' 2>/dev/null)" \
+    # Same-repository only, as for the gate's sync: --head matches a fork's
+    # branch of the same name too.
+    RT_PR="$(gh pr list --repo "$repo" --head "$RT_BRANCH" --state open --json url,isCrossRepository \
+               --jq '[.[] | select(.isCrossRepository | not)][0].url // empty' 2>/dev/null)" \
         || { RT_STATE="error:pr-lookup"; RT_PR=""; return; }
 
     if [ "${#drift[@]}" -eq 0 ]; then
