@@ -70,6 +70,52 @@ The gate reports and never rewrites; see [Rewriting history](#rewriting-history)
 
 Set `history: range` to only check the commits a push/PR introduces.
 
+### Foreign upstream history
+
+A fork of someone else's project carries its upstream's history: on
+kodflow/forgejo-raft, 26 000 commits from Forgejo and Gitea, none by the fleet.
+No `authors` list passes them, and their subjects, trailers and diffs follow
+upstream's rules, not ours. What the gate exists for there is narrower: the
+owner's own identities must never appear in a commit, and the fleet's own
+commits keep every rule.
+
+A repository named in [`scripts/foreign-history.txt`](scripts/foreign-history.txt)
+is judged that way, with the stub unchanged:
+
+| Commit | Identity | Attribution | Format, secrets, mcp.json |
+|---|---|---|---|
+| **ours** — author *or* committer is one of `authors` | deny list | message and identity | yes |
+| **foreign** — anybody else | deny list | author and committer only | no |
+
+- **Deny list** — [`scripts/denied-identities.txt`](scripts/denied-identities.txt):
+  SHA-256 digests of whole addresses (`name@example.com`) or whole domains
+  (`@example.com`), never the addresses themselves, since this repository is
+  public. Every address-shaped token of every commit in scope is checked —
+  author, committer, trailers, anywhere in the message — and the report names
+  the commit and where the address sits, never the address. Add one with
+  `printf '%s' 'name@example.com' | sha256sum`.
+- **Allow-list** — gives way to the deny list on both kinds of commit. A
+  maintainer upstream may commit or review a commit of ours; that is not a leak.
+- **"Ours"** is decided by the logins alone. GitHub's merge committer and app
+  accounts do not make a commit ours: Gitea was merged through GitHub's web UI
+  for years.
+- **A foreign commit's identity is still read for attribution**, so an
+  assistant committing under its own name is not mistaken for upstream.
+- **Agent artefacts** read the tree and are unchanged.
+- **Secrets** read each of our non-merge commits against its parent rather
+  than the range's two ends — stricter: a credential added then removed inside
+  the range is still found.
+
+The scopes do not change: a pull request reads its full ancestry, a push or a
+manual run every branch and every tag. Only our commits go through the
+per-commit checks, so the whole of forgejo-raft takes about six seconds.
+
+The list lives here, not in the repository it loosens: no stub, variable or
+job `env:` can turn the mode on, and the action sets every path the gate reads
+itself. Listing a repository is a reviewed change to this one. A listed
+repository with no `authors`, or an empty or malformed deny list, is a usage
+error (exit 2), never a pass.
+
 ### Agent artefacts: configuration is source, exhaust is not
 
 An agent's configuration is **source**. `.claude/agents/`, `.claude/commands/`,
@@ -546,6 +592,8 @@ scripts/patterns.txt          default forbidden patterns (attribution-shaped)
 scripts/patterns-strict.txt   opt-in keyword patterns
 scripts/patterns.sh           reference reader of both: scopes (commit, pr), list, check
 scripts/agent-paths.txt       agent RUNTIME paths (logs, transcripts, caches); config kept
+scripts/foreign-history.txt   repositories judged in foreign-history mode (forks of upstreams)
+scripts/denied-identities.txt SHA-256 of the identities no commit may carry there
 scripts/enforce.sh            fleet: stub PR + ruleset + runner-template stubs, idempotent
 scripts/bump-runner-template.sh  move every runner-template stub to one kodflow/runner-template commit
 scripts/rewrite-history.sh    history scrub (messages + identities), dry-run by default

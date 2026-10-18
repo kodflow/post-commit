@@ -41,6 +41,18 @@
 #                    a token ends up. Not switchable. A deletion, or a rename
 #                    to another name, is the way out and always passes.
 #
+# Foreign-history mode, for a repository listed in foreign-history.txt (a
+# fork of someone else's project carrying its whole upstream history):
+#   · a commit is OURS when its author or committer is one of PC_AUTHORS,
+#     FOREIGN otherwise;
+#   · checks 1 and 2 give way to a deny list (denied-identities.txt): no
+#     denied address anywhere in any commit, ours or foreign;
+#   · check 3 reads our commits whole and a foreign commit's author and
+#     committer only, so an assistant committing under its own name is still
+#     refused while upstream's messages are not ours to police;
+#   · checks 4, 5 and 7 read our commits only; check 6 is unchanged.
+# Every other repository is judged exactly as before.
+#
 # Deliberately NOT here: lint/build/test. Every repo's own CI already runs
 # those server-side, so --no-verify never bypassed them in the first place.
 #
@@ -129,20 +141,90 @@ fi
 #     and merge performed through the web UI or the API;
 #   · app/bot accounts (`…[bot]@users.noreply.github.com`) — dependabot,
 #     github-actions and friends.
-IDENT_RE=""
+IDENT_RE=""; LOGIN_RE=""
 if [ -n "$AUTHORS" ]; then
     for login in ${AUTHORS//,/ }; do
         esc_login="$(printf '%s' "$login" | sed 's/[][\.^$*+?(){}|]/\\&/g')"
         IDENT_RE="${IDENT_RE}|^([0-9]+\+)?${esc_login}@users\.noreply\.github\.com$"
     done
     IDENT_RE="${IDENT_RE#|}"
+    # Before the generic families are appended: foreign-history mode needs
+    # the fleet's own logins alone (see below).
+    LOGIN_RE="$IDENT_RE"
     IDENT_RE="${IDENT_RE}|^noreply@github\.com$|^[0-9]+\+[^@]+\[bot\]@users\.noreply\.github\.com$"
 fi
 
+# --- Foreign-history mode -----------------------------------------------------
+# For a fork that carries its upstream's history: tens of thousands of commits
+# by people who are not the fleet, which no allow-list can pass and no message
+# rule is ours to impose on. The repository is named in a list that lives in
+# THIS repository, never in the caller's: a stub, a variable or a job `env:`
+# that could switch the mode on would be a way out of the gate one edit away.
+# The action passes both paths explicitly, so a caller's environment cannot
+# point them elsewhere either.
+#
+# OURS is decided by the fleet's logins only (LOGIN_RE), never by GitHub's
+# merge committer or an app account: Gitea, Forgejo's ancestor, was merged
+# through GitHub's web UI for years, so `noreply@github.com` commits tens of
+# thousands of upstream changes.
+FOREIGN=false
+REPOSITORY="${PC_REPOSITORY:-}"
+FOREIGN_REGISTRY="${PC_FOREIGN_REGISTRY:-$SCRIPT_DIR/foreign-history.txt}"
+DENY_FILE="${PC_DENY_FILE:-$SCRIPT_DIR/denied-identities.txt}"
+if [ -n "$REPOSITORY" ] && [ -f "$FOREIGN_REGISTRY" ]; then
+    while IFS= read -r line; do
+        line="${line%%#*}"; line="${line//[[:space:]]/}"
+        [ -n "$line" ] && [ "${line,,}" = "${REPOSITORY,,}" ] && FOREIGN=true && break
+    done < "$FOREIGN_REGISTRY"
+fi
+declare -A DENY_HASH=()
+if [ "$FOREIGN" = "true" ]; then
+    if [ -z "$AUTHORS" ]; then
+        echo "::error::$REPOSITORY is a foreign-history repository but no authors are set — nothing would tell its commits from upstream's" >&2
+        exit 2
+    fi
+    if [ -f "$DENY_FILE" ]; then
+        while IFS= read -r line; do
+            line="${line%%#*}"; line="${line//[[:space:]]/}"
+            [ -z "$line" ] && continue
+            if [[ ! "$line" =~ ^[0-9a-f]{64}$ ]]; then
+                echo "::error::$DENY_FILE: not a lowercase SHA-256: '$line'" >&2
+                exit 2
+            fi
+            DENY_HASH["$line"]=1
+        done < "$DENY_FILE"
+    fi
+    # The deny list is all that stands between a personal address and a
+    # foreign commit, so an empty one is a check that verifies nothing.
+    if [ "${#DENY_HASH[@]}" -eq 0 ]; then
+        echo "::error::no denied identity loaded from '$DENY_FILE' — refusing to report a false clean" >&2
+        exit 2
+    fi
+    echo "::notice::foreign-history mode ($REPOSITORY): commits by none of '$AUTHORS' are checked for denied identities and AI authorship only"
+fi
+
+# sha256_lines: "<digest>\t<line>" for every line of stdin, in one process
+# when perl can (Digest::SHA is core perl; a fork's history holds thousands of
+# distinct addresses, and a process per address is seconds of overhead).
+sha256_lines() {
+    if perl -MDigest::SHA -e1 2>/dev/null; then
+        perl -MDigest::SHA=sha256_hex -ne 'chomp; print sha256_hex($_), "\t", $_, "\n"'
+        return
+    fi
+    local l h
+    while IFS= read -r l; do
+        if command -v sha256sum >/dev/null 2>&1; then h="$(printf '%s' "$l" | sha256sum)"
+        else h="$(printf '%s' "$l" | shasum -a 256)"; fi
+        printf '%s\t%s\n' "${h%% *}" "$l"
+    done
+}
+
 ATTR_FILE="$(mktemp)"; FMT_FILE="$(mktemp)"; SEC_FILE="$(mktemp)"; IDENT_FILE="$(mktemp)"
 TRAIL_FILE="$(mktemp)"; AGENT_FILE="$(mktemp)"; MCP_FILE="$(mktemp)"; REPORT_BODY="$(mktemp)"
-trap 'rm -f "$ATTR_FILE" "$FMT_FILE" "$SEC_FILE" "$IDENT_FILE" "$TRAIL_FILE" "$AGENT_FILE" "$MCP_FILE" "$REPORT_BODY"' EXIT
+DENY_OUT="$(mktemp)"; FOREIGN_IDS="$(mktemp)"; PAT_FILE="$(mktemp)"
+trap 'rm -f "$ATTR_FILE" "$FMT_FILE" "$SEC_FILE" "$IDENT_FILE" "$TRAIL_FILE" "$AGENT_FILE" "$MCP_FILE" "$REPORT_BODY" "$DENY_OUT" "$FOREIGN_IDS" "$PAT_FILE"' EXIT
 ATTR_N=0; ATTR_SCANNED=0; FMT_N=0; FMT_SCANNED=0; SEC_N=0; IDENT_N=0; TRAIL_N=0; AGENT_N=0; MCP_N=0
+FOREIGN_N=0; DENY_N=0
 AGENT_ROOT_N=0
 
 # Identity trailers, whatever the case. An address here is as permanent as the
@@ -176,10 +258,108 @@ else
 fi
 ATTR_SCOPE="${SCOPE_ARGS[*]}"
 
-RAW="$(git log "${SCOPE_ARGS[@]}" --format='%H%x1f%an%x1f%ae%x1f%cn%x1f%ce%x1f%s%x1f%B%x1e' 2>/dev/null)" || {
-    echo "::error::git log failed for '$ATTR_SCOPE' — shallow checkout? (needs fetch-depth: 0)" >&2
-    exit 2
-}
+RAW_FORMAT='%H%x1f%an%x1f%ae%x1f%cn%x1f%ce%x1f%s%x1f%B%x1e'
+if [ "$FOREIGN" != "true" ]; then
+    RAW="$(git log "${SCOPE_ARGS[@]}" --format="$RAW_FORMAT" 2>/dev/null)" || {
+        echo "::error::git log failed for '$ATTR_SCOPE' — shallow checkout? (needs fetch-depth: 0)" >&2
+        exit 2
+    }
+else
+    # Sort first, on identities alone: the loop below costs a handful of
+    # processes per commit, which over an upstream's 26 000 commits is far
+    # beyond the job's timeout. Only OUR commits go through it; a foreign one
+    # costs a regex match here and a line in two bulk scans.
+    IDS="$(git log "${SCOPE_ARGS[@]}" --format='%H%x1f%an%x1f%ae%x1f%cn%x1f%ce' 2>/dev/null)" || {
+        echo "::error::git log failed for '$ATTR_SCOPE' — shallow checkout? (needs fetch-depth: 0)" >&2
+        exit 2
+    }
+    LOGIN_LC="${LOGIN_RE,,}"
+    declare -A OWNED=()
+    OWNED_LIST=()
+    while IFS=$'\x1f' read -r SHA AN AE CN CE; do
+        [ -z "$SHA" ] && continue
+        if [[ "${AE,,}" =~ $LOGIN_LC || "${CE,,}" =~ $LOGIN_LC ]]; then
+            OWNED["$SHA"]=1; OWNED_LIST+=("$SHA")
+        else
+            FOREIGN_N=$((FOREIGN_N + 1))
+            # The identity is the one part of a foreign commit still read for
+            # attribution: an assistant committing as itself, under its own
+            # name and address, must not pass for upstream.
+            printf 'author: %s <%s>\x1f%s\n' "$AN" "$AE" "$SHA" >> "$FOREIGN_IDS"
+            printf 'committer: %s <%s>\x1f%s\n' "$CN" "$CE" "$SHA" >> "$FOREIGN_IDS"
+        fi
+    done <<< "$IDS"
+    RAW=""
+    if [ "${#OWNED_LIST[@]}" -gt 0 ]; then
+        RAW="$(printf '%s\n' "${OWNED_LIST[@]}" | git log --no-walk=unsorted --stdin --format="$RAW_FORMAT" 2>/dev/null)" || {
+            echo "::error::git log failed on the repository's own commits" >&2
+            exit 2
+        }
+    fi
+
+    # Foreign identities against the attribution patterns, in one grep. Each
+    # line ends with its SHA behind a \x1f, which no pattern can reach into:
+    # a SHA is hex, and every pattern needs a letter past `f` or a symbol.
+    printf '%s\n' "${PATTERNS[@]}" > "$PAT_FILE"
+    declare -A FOREIGN_HIT=()
+    while IFS= read -r hit; do
+        [ -z "$hit" ] && continue
+        SHA="${hit##*$'\x1f'}"; WHO="${hit%$'\x1f'*}"
+        [ -n "${FOREIGN_HIT[$SHA]+set}" ] && continue
+        FOREIGN_HIT["$SHA"]=1
+        ATTR_N=$((ATTR_N + 1))
+        if [ "$ATTR_N" -le "$MAX_REPORT" ]; then
+            SUBJ="$(git log -1 --format=%s "$SHA")"
+            printf '%s\t%s\t%s\t%s\n' "$SHA" "$SUBJ" "identity" "$(printf '%s' "$WHO" | cut -c1-120)" >> "$ATTR_FILE"
+        fi
+    done < <(grep -iE -f "$PAT_FILE" -- "$FOREIGN_IDS" 2>/dev/null)
+    ATTR_SCANNED=$((ATTR_SCANNED + FOREIGN_N))
+
+    # The deny list, over every commit of the scope, ours and foreign alike,
+    # and over the whole message, not only the trailers: an address the owner
+    # keeps out of histories is out of all of it. Every address-shaped token
+    # is collected once, hashed with and without its local part, and only a
+    # match sends the history through a second, locating pass.
+    declare -A DENIED=()
+    CANDS="$(git log "${SCOPE_ARGS[@]}" --format='%ae%n%ce%n%B' 2>/dev/null \
+              | grep -oE '[[:alnum:]._%+-]+@[[:alnum:].-]+' | tr '[:upper:]' '[:lower:]' \
+              | sed 's/\.*$//' | sort -u)"
+    if [ -n "$CANDS" ]; then
+        declare -A DIGEST=()
+        while IFS=$'\t' read -r h v; do DIGEST["$v"]="$h"; done < <(
+            { printf '%s\n' "$CANDS"; printf '%s\n' "$CANDS" | sed 's/^[^@]*//'; } | sort -u | sha256_lines)
+        while IFS= read -r e; do
+            [ -z "$e" ] && continue
+            if [ -n "${DENY_HASH[${DIGEST[$e]}]+set}" ] || [ -n "${DENY_HASH[${DIGEST[@${e#*@}]}]+set}" ]; then
+                DENIED["$e"]=1
+            fi
+        done <<< "$CANDS"
+    fi
+    if [ "${#DENIED[@]}" -gt 0 ]; then
+        # Where it sits, never what it is: the report is a job summary and a
+        # pull-request comment, and printing the address would publish the
+        # very thing this check keeps out.
+        while IFS=$'\t' read -r SHA SUBJ WHERE; do
+            [ -z "$SHA" ] && continue
+            DENY_N=$((DENY_N + 1))
+            [ "$DENY_N" -le "$MAX_REPORT" ] && printf '%s\t%s\t%s\n' "$SHA" "$SUBJ" "$WHERE" >> "$DENY_OUT"
+        done < <(git log "${SCOPE_ARGS[@]}" --format='%H%x1f%s%x1f%ae%x1f%ce%x1f%B%x1e' 2>/dev/null \
+                 | PC_DENIED="$(printf '%s\n' "${!DENIED[@]}")" awk -v RS=$'\x1e' -v FS=$'\x1f' '
+                     BEGIN { n = split(ENVIRON["PC_DENIED"], d, "\n") }
+                     {
+                         sub(/^\n+/, "")
+                         if ($0 == "") next
+                         where = ""
+                         for (i = 1; i <= n; i++) {
+                             if (d[i] == "") continue
+                             if (index(tolower($3), d[i]) && where !~ /author/)    where = where (where ? ", " : "") "author"
+                             if (index(tolower($4), d[i]) && where !~ /committer/) where = where (where ? ", " : "") "committer"
+                             if (index(tolower($5), d[i]) && where !~ /message/)   where = where (where ? ", " : "") "message"
+                         }
+                         if (where != "") { gsub(/\t/, " ", $2); print $1 "\t" $2 "\t" where }
+                     }')
+    fi
+fi
 
 while IFS= read -r -d $'\x1e' REC; do
     REC="${REC#$'\n'}"
@@ -192,7 +372,8 @@ while IFS= read -r -d $'\x1e' REC; do
     SUBJ="${REST%%$'\x1f'*}"; BODY="${REST#*$'\x1f'}"
     ATTR_SCANNED=$((ATTR_SCANNED + 1))
 
-    if [ -n "$IDENT_RE" ]; then
+    # Foreign-history mode: the deny list above decides who may appear.
+    if [ -n "$IDENT_RE" ] && [ "$FOREIGN" != "true" ]; then
         BAD=""
         printf '%s' "$AE" | grep -qiE -- "$IDENT_RE" || BAD="author $AN <$AE>"
         if ! printf '%s' "$CE" | grep -qiE -- "$IDENT_RE"; then
@@ -205,7 +386,7 @@ while IFS= read -r -d $'\x1e' REC; do
         fi
     fi
 
-    if [ -n "$IDENT_RE" ]; then
+    if [ -n "$IDENT_RE" ] && [ "$FOREIGN" != "true" ]; then
         BADT=""
         while IFS= read -r TL; do
             [ -n "$TL" ] || continue
@@ -240,9 +421,14 @@ done <<< "$RAW"
 # what GitHub writes when a repo is created from a template.
 CONVENTIONAL='^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([^)]+\))?!?: [^[:space:]].*$'
 GIT_NATIVE='^(Revert "|Initial commit$)'
+# ours <sha>: true outside foreign-history mode, and there for OUR commits
+# only. Format, secrets and mcp.json judge what the fleet writes; upstream's
+# subjects and diffs follow upstream's rules, not this repository's.
+ours() { [ "$FOREIGN" != "true" ] || [ -n "${OWNED[$1]+set}" ]; }
 if [ "$FORMAT" = "true" ] && [ -n "$RANGE" ]; then
     while IFS=$'\x1f' read -r SHA SUBJ; do
         [ -z "$SHA" ] && continue
+        ours "$SHA" || continue
         FMT_SCANNED=$((FMT_SCANNED + 1))
         if [[ ! "$SUBJ" =~ $CONVENTIONAL ]] && [[ ! "$SUBJ" =~ $GIT_NATIVE ]]; then
             FMT_N=$((FMT_N + 1))
@@ -333,7 +519,22 @@ SECRET_EXCLUDE=(':(exclude,glob)tests/**' ':(exclude,glob)**/tests/**'
 # The passes overlap — a `${VAR:-secret}` line is in 2 and 3 — so the union is
 # de-duplicated. awk rather than `sort -u`: it keeps the diff's own order, which
 # is the order the report reads best in.
+#
+# In foreign-history mode the range is mostly upstream's code, so the added
+# lines are read per commit, from OUR non-merge commits only — each against
+# its parent. That is stricter for those commits than the range's two ends: a
+# credential added in one and removed in the next is still found.
 secret_added_lines() {
+    if [ "$FOREIGN" = "true" ]; then
+        local sha
+        while IFS= read -r sha; do
+            [ -z "$sha" ] && continue
+            ours "$sha" || continue
+            git diff-tree -p -r --root --no-commit-id --unified=0 "$sha" -- . "${SECRET_EXCLUDE[@]}" 2>/dev/null
+        done < <(git log --no-merges --format=%H "$RANGE" 2>/dev/null) \
+          | grep -E '^\+' | grep -Ev '^\+\+\+'
+        return
+    fi
     git diff --unified=0 "$RANGE" -- . "${SECRET_EXCLUDE[@]}" 2>/dev/null \
       | grep -E '^\+' | grep -Ev '^\+\+\+'
 }
@@ -464,6 +665,7 @@ MCP_RE='(^|/)\.?mcp\.json$'
 if [ -n "$RANGE" ]; then
     while IFS= read -r SHA; do
         [ -z "$SHA" ] && continue
+        ours "$SHA" || continue
         SUBJ="$(git log -1 --format=%s "$SHA")"
         while IFS= read -r -d '' ST; do
             P=""
@@ -501,11 +703,39 @@ esc_prop() {
     fi
     [ -n "$RANGE" ] && echo "Format: **$FMT_SCANNED** non-merge commit(s) in \`$RANGE\`. Secrets: added lines in \`$RANGE\`. mcp.json: every non-merge commit in \`$RANGE\`."
     [ "$AGENT_FILES" = "true" ] && echo "Agent artefacts: paths tracked at \`${TREE_REV:0:12}\`."
+    if [ "$FOREIGN" = "true" ]; then
+        echo ""
+        echo "Foreign-history mode (\`$REPOSITORY\`): **$FOREIGN_N** commit(s) by none of \`${AUTHORS}\` —"
+        echo "checked for denied identities and AI authorship only. **$((ATTR_SCANNED - FOREIGN_N))** of the"
+        echo "repository's own, checked in full. Denied identities: every commit of the scope."
+    fi
     echo ""
     if [ "$ATTR_N" -eq 0 ] && [ "$FMT_N" -eq 0 ] && [ "$SEC_N" -eq 0 ] && [ "$IDENT_N" -eq 0 ] \
-       && [ "$TRAIL_N" -eq 0 ] && [ "$AGENT_N" -eq 0 ] && [ "$MCP_N" -eq 0 ]; then
+       && [ "$TRAIL_N" -eq 0 ] && [ "$AGENT_N" -eq 0 ] && [ "$MCP_N" -eq 0 ] && [ "$DENY_N" -eq 0 ]; then
         # Only a range is read for mcp.json, so only a range may claim it.
-        echo "✅ Clean — allowed identities, no AI attribution, conventional subjects, no credentials added, no agent artefacts tracked${RANGE:+, no mcp.json committed}."
+        if [ "$FOREIGN" = "true" ]; then
+            echo "✅ Clean — no denied identity, no AI attribution, conventional subjects, no credentials added, no agent artefacts tracked${RANGE:+, no mcp.json committed}."
+        else
+            echo "✅ Clean — allowed identities, no AI attribution, conventional subjects, no credentials added, no agent artefacts tracked${RANGE:+, no mcp.json committed}."
+        fi
+    fi
+    if [ "$DENY_N" -gt 0 ]; then
+        echo "### ❌ Denied identity — $DENY_N commit(s)"
+        echo ""
+        echo "An address on the deny list (\`scripts/denied-identities.txt\` in"
+        echo "kodflow/post-commit) appears in these commits. It is not repeated here:"
+        echo "this report is public wherever the repository is."
+        echo ""
+        echo "| Commit | Subject | Where |"
+        echo "|---|---|---|"
+        while IFS=$'\t' read -r sha subj where; do
+            printf '| `%s` | %s | %s |\n' "${sha:0:8}" "$(esc "$subj")" "$(esc "$where")"
+        done < "$DENY_OUT"
+        [ "$DENY_N" -gt "$MAX_REPORT" ] && echo "" && echo "_… and $((DENY_N - MAX_REPORT)) more._"
+        echo ""
+        echo "> Rewrite those commits with the owning account's noreply address"
+        echo "> (\`scripts/rewrite-history.sh\` for commits already on a branch)."
+        echo ""
     fi
     if [ "$TRAIL_N" -gt 0 ]; then
         echo "### ❌ Foreign identity in a trailer — $TRAIL_N commit(s)"
@@ -641,6 +871,13 @@ cat "$REPORT_BODY" >> "$SUMMARY"
 [ -n "$REPORT" ] && cp "$REPORT_BODY" "$REPORT"
 
 RC=0
+if [ "$DENY_N" -gt 0 ]; then
+    RC=1
+    while IFS=$'\t' read -r sha subj where; do
+        echo "::error::denied identity in ${sha:0:8} (${subj}) — ${where}"
+    done < "$DENY_OUT"
+    echo "::error::$DENY_N commit(s) carry an identity on the deny list"
+fi
 if [ "$IDENT_N" -gt 0 ]; then
     RC=1
     while IFS=$'\t' read -r sha subj who; do
@@ -700,6 +937,8 @@ if [ "$RC" -eq 0 ]; then
     [ "$AGENT_FILES" = "true" ] && AGENT_CLAIM=", no agent artefacts tracked"
     MCP_CLAIM=""
     [ -n "$RANGE" ] && MCP_CLAIM=", no mcp.json committed"
-    echo "✅ post-commit: $ATTR_SCANNED commit(s) attribution-free${IDENT_RE:+ and correctly attributed}, $FMT_SCANNED subject(s) conventional, no credentials added${AGENT_CLAIM}${MCP_CLAIM}"
+    IDENT_CLAIM="${IDENT_RE:+ and correctly attributed}"
+    [ "$FOREIGN" = "true" ] && IDENT_CLAIM=" and free of denied identities ($FOREIGN_N foreign)"
+    echo "✅ post-commit: $ATTR_SCANNED commit(s) attribution-free${IDENT_CLAIM}, $FMT_SCANNED subject(s) conventional, no credentials added${AGENT_CLAIM}${MCP_CLAIM}"
 fi
 exit "$RC"

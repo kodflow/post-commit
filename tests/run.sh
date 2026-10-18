@@ -352,6 +352,168 @@ out="$(cd "$d" && env GITHUB_STEP_SUMMARY=/dev/null PC_AUTHORS=kodflow bash "$GA
 if [ "$rc" -eq 1 ]; then PASS=$((PASS+1)); printf '  ok   %s\n' "a commit only a tag reaches is still scanned"
 else FAIL=$((FAIL+1)); printf '  FAIL %s (want exit 1, got %s)\n' "a commit only a tag reaches is still scanned" "$rc"; fi
 
+echo "== foreign-history mode =="
+# A fork carrying its upstream's history. The registry and the deny list are
+# throwaway copies, so these cases pin the mechanism, not the shipped lists;
+# the last cases read the shipped ones.
+FH="$(mktemp -d)"
+sha256() { if command -v sha256sum >/dev/null 2>&1; then sha256sum; else shasum -a 256; fi | cut -c1-64; }
+printf '# a comment\n\n  acme/fork  \n' > "$FH/registry.txt"
+{ echo "# owner's addresses"
+  printf '%s' 'owner@personal.example' | sha256
+  printf '%s' '@home.example' | sha256; } > "$FH/deny.txt"
+FOREIGN_ENV=(PC_AUTHORS=kodflow PC_REPOSITORY=acme/fork PC_FOREIGN_REGISTRY="$FH/registry.txt" PC_DENY_FILE="$FH/deny.txt")
+KF=133899878+kodflow@users.noreply.github.com
+# as <repo> <author-email> <committer-email> <message>: one commit, those identities
+as() {
+    local d="$1" ae="$2" ce="$3"
+    echo "$RANDOM$RANDOM" > "$d/f.txt"; git -C "$d" add -A
+    GIT_AUTHOR_NAME=a GIT_AUTHOR_EMAIL="$ae" GIT_COMMITTER_NAME=c GIT_COMMITTER_EMAIL="$ce" \
+        git -C "$d" commit -q -F - <<< "$4"
+}
+# upstream <repo>: two commits nobody in the fleet wrote, in upstream's style.
+# The second is committed by GitHub's web UI, as Gitea's were for years: that
+# identity is allowed for the fleet, but it does not make a commit ours.
+upstream() {
+    as "$1" dev@upstream.example dev@upstream.example "[gitea] Fix the thing (#123)
+
+Co-authored-by: Other <other@upstream.example>
+Reviewed-on: https://codeberg.org/forgejo/forgejo/pulls/123"
+    as "$1" dev2@upstream.example noreply@github.com "Update translations"
+}
+
+d=$(mkrepo); upstream "$d"; RANGE_SPEC='HEAD~2..HEAD'
+check "unlisted repository: upstream commits refused as before" 1 "$d" PC_AUTHORS=kodflow PC_REPOSITORY=acme/other PC_FOREIGN_REGISTRY="$FH/registry.txt" PC_DENY_FILE="$FH/deny.txt"
+
+d=$(mkrepo); upstream "$d"; RANGE_SPEC='HEAD~2..HEAD'
+check "no repository named (a local run): refused as before" 1 "$d" PC_AUTHORS=kodflow PC_FOREIGN_REGISTRY="$FH/registry.txt" PC_DENY_FILE="$FH/deny.txt"
+
+d=$(mkrepo); upstream "$d"; RANGE_SPEC='HEAD~2..HEAD'
+check "listed: upstream commits pass, subjects and trailers theirs" 0 "$d" "${FOREIGN_ENV[@]}"
+
+d=$(mkrepo); upstream "$d"; RANGE_SPEC='HEAD~2..HEAD'
+check "listed: the registry is case-insensitive" 0 "$d" "${FOREIGN_ENV[@]}" PC_REPOSITORY=ACME/Fork
+
+d=$(mkrepo); upstream "$d"; as "$d" "$KF" "$KF" "feat: ours on top"; RANGE_SPEC='HEAD~3..HEAD'
+check "listed: upstream ancestry plus our conventional commit, full history" 0 "$d" "${FOREIGN_ENV[@]}"
+
+d=$(mkrepo); upstream "$d"; as "$d" "$KF" "$KF" "feat: ours on top
+
+Reviewed-by: Upstream Maintainer <maint@upstream.example>"
+check "listed: a stranger in OUR trailer is no longer an allow-list matter" 0 "$d" "${FOREIGN_ENV[@]}"
+
+echo "-- denied identities, wherever they sit"
+d=$(mkrepo); upstream "$d"; as "$d" owner@personal.example dev@upstream.example "Fix it"
+check "denied author on a foreign commit" 1 "$d" "${FOREIGN_ENV[@]}"
+
+d=$(mkrepo); as "$d" "$KF" owner@personal.example "feat: thing"
+check "denied committer on one of OUR commits" 1 "$d" "${FOREIGN_ENV[@]}"
+
+d=$(mkrepo); as "$d" dev@upstream.example dev@upstream.example "Fix it
+
+Co-authored-by: Me <Owner@Personal.EXAMPLE>"
+check "denied address in a foreign trailer, any case" 1 "$d" "${FOREIGN_ENV[@]}"
+
+d=$(mkrepo); as "$d" dev@upstream.example dev@upstream.example "Fix it, thanks to owner@personal.example."
+check "denied address anywhere in a foreign message" 1 "$d" "${FOREIGN_ENV[@]}"
+
+d=$(mkrepo); as "$d" dev@upstream.example anyone@home.example "Fix it"
+check "a domain entry refuses every address at that domain" 1 "$d" "${FOREIGN_ENV[@]}"
+
+d=$(mkrepo); as "$d" owner@personal.example owner@personal.example "Fix it"
+as "$d" "$KF" "$KF" "feat: clean tip"
+check "a denied ancestor blocks a clean tip (full history)" 1 "$d" "${FOREIGN_ENV[@]}"
+
+d=$(mkrepo); as "$d" dev@upstream.example dev@upstream.example "Fix it
+
+Signed-off-by: x <owner@personal.example>"
+rep="$(mktemp)"
+(cd "$d" && env GITHUB_STEP_SUMMARY=/dev/null PC_REPORT="$rep" "${FOREIGN_ENV[@]}" bash "$GATE" HEAD HEAD~1..HEAD >/dev/null 2>&1)
+if grep -q 'Denied identity' "$rep" && ! grep -qi 'personal\.example' "$rep"; then
+    PASS=$((PASS+1)); echo "  ok   the report names the commit, never the denied address"
+else FAIL=$((FAIL+1)); echo "  FAIL the report leaks the denied address or misses it"; sed 's/^/       /' "$rep"; fi
+rm -rf "$d" "$rep"
+
+d=$(mkrepo); git -C "$d" config user.email florent@making.codes; commit_msg "$d" "feat: thing"
+check "the shipped deny list refuses the owner's domain" 1 "$d" PC_AUTHORS=kodflow PC_REPOSITORY=acme/fork PC_FOREIGN_REGISTRY="$FH/registry.txt"
+
+echo "-- AI authorship, ours and theirs"
+d=$(mkrepo); as "$d" noreply@anthropic.com noreply@anthropic.com "Fix it"
+check "an assistant committing under its own identity is not upstream" 1 "$d" "${FOREIGN_ENV[@]}"
+
+d=$(mkrepo); as "$d" dev@upstream.example dev@upstream.example "Fix it
+
+Co-authored-by: Claude <noreply@anthropic.com>"
+check "a foreign commit's message is upstream's business" 0 "$d" "${FOREIGN_ENV[@]}"
+
+d=$(mkrepo); as "$d" "$KF" "$KF" "feat: thing
+
+Co-authored-by: Claude <noreply@anthropic.com>"
+check "OUR commit's message is still read in full" 1 "$d" "${FOREIGN_ENV[@]}"
+
+d=$(mkrepo); as "$d" dev@upstream.example "$KF" "feat: rebased by us
+
+Co-authored-by: Claude <noreply@anthropic.com>"
+check "committed by us is ours, whoever authored it" 1 "$d" "${FOREIGN_ENV[@]}"
+
+echo "-- format, secrets and mcp.json: our commits only"
+d=$(mkrepo); as "$d" "$KF" "$KF" "Fix it"
+check "OUR non-conventional subject is refused" 1 "$d" "${FOREIGN_ENV[@]}"
+
+d=$(mkrepo); echo 'key = AKIA0000000000000000' > "$d/k.txt"; git -C "$d" add -A
+GIT_AUTHOR_EMAIL=dev@upstream.example GIT_COMMITTER_EMAIL=dev@upstream.example git -C "$d" commit -qm "Add key"
+check "a credential shape in upstream's code is upstream's" 0 "$d" "${FOREIGN_ENV[@]}"
+
+d=$(mkrepo); echo 'key = AKIA0000000000000000' > "$d/k.txt"; git -C "$d" add -A
+GIT_AUTHOR_EMAIL="$KF" GIT_COMMITTER_EMAIL="$KF" git -C "$d" commit -qm "feat: add key"
+check "a credential in OUR commit is refused" 1 "$d" "${FOREIGN_ENV[@]}"
+
+d=$(mkrepo); echo 'key = AKIA0000000000000000' > "$d/k.txt"; git -C "$d" add -A
+GIT_AUTHOR_EMAIL="$KF" GIT_COMMITTER_EMAIL="$KF" git -C "$d" commit -qm "feat: add key"
+git -C "$d" rm -q k.txt; GIT_AUTHOR_EMAIL="$KF" GIT_COMMITTER_EMAIL="$KF" git -C "$d" commit -qm "fix: drop key"
+RANGE_SPEC='HEAD~2..HEAD'
+check "...even when a later commit of the range removes it" 1 "$d" "${FOREIGN_ENV[@]}"
+
+d=$(mkrepo); echo '{}' > "$d/.mcp.json"; git -C "$d" add -A
+GIT_AUTHOR_EMAIL=dev@upstream.example GIT_COMMITTER_EMAIL=dev@upstream.example git -C "$d" commit -qm "Add mcp"
+check "an mcp.json from upstream is upstream's" 0 "$d" "${FOREIGN_ENV[@]}"
+
+d=$(mkrepo); echo '{}' > "$d/.mcp.json"; git -C "$d" add -A
+GIT_AUTHOR_EMAIL="$KF" GIT_COMMITTER_EMAIL="$KF" git -C "$d" commit -qm "chore: add mcp"
+check "an mcp.json in OUR commit is refused" 1 "$d" "${FOREIGN_ENV[@]}"
+
+d=$(mkrepo); mkdir -p "$d/.claude/logs"; echo x > "$d/.claude/logs/s.jsonl"; git -C "$d" add -A
+GIT_AUTHOR_EMAIL=dev@upstream.example GIT_COMMITTER_EMAIL=dev@upstream.example git -C "$d" commit -qm "Add logs"
+check "agent artefacts read the tree, whoever added them" 1 "$d" "${FOREIGN_ENV[@]}"
+
+echo "-- whole repository and refusals to run"
+d=$(mkrepo); upstream "$d"; git -C "$d" checkout -q -b side
+as "$d" owner@personal.example owner@personal.example "Side work"; git -C "$d" tag t1; git -C "$d" checkout -q main
+out="$(cd "$d" && env GITHUB_STEP_SUMMARY=/dev/null "${FOREIGN_ENV[@]}" bash "$GATE" --branches 2>&1)"; rc=$?
+if [ "$rc" -eq 1 ] && printf '%s' "$out" | grep -q 'denied identity'; then
+    PASS=$((PASS+1)); echo "  ok   the whole-repository scan finds a denied identity off the head"
+else FAIL=$((FAIL+1)); printf '  FAIL whole-repository scan (rc %s)\n%s\n' "$rc" "$(printf '%s' "$out" | sed 's/^/       /')"; fi
+rm -rf "$d"
+
+d=$(mkrepo); upstream "$d"
+check "listed without authors: usage error, not a pass" 2 "$d" "${FOREIGN_ENV[@]}" PC_AUTHORS=
+d=$(mkrepo); : > "$FH/empty.txt"
+check "an empty deny list: refused, never a false clean" 2 "$d" "${FOREIGN_ENV[@]}" PC_DENY_FILE="$FH/empty.txt"
+d=$(mkrepo); echo 'owner@personal.example' > "$FH/clear.txt"
+check "an address written in clear in the deny list: refused" 2 "$d" "${FOREIGN_ENV[@]}" PC_DENY_FILE="$FH/clear.txt"
+
+# The shipped lists: well formed, and the repository the mode was written for.
+n=0
+while IFS= read -r l; do
+    l="${l%%#*}"; l="${l//[[:space:]]/}"; [ -z "$l" ] && continue
+    [[ "$l" =~ ^[0-9a-f]{64}$ ]] || n=$((n+1))
+done < "$ROOT/scripts/denied-identities.txt"
+if [ "$n" -eq 0 ]; then PASS=$((PASS+1)); echo "  ok   shipped deny list: digests only, no address in clear"
+else FAIL=$((FAIL+1)); echo "  FAIL shipped deny list holds $n line(s) that are not a digest"; fi
+if grep -qx 'kodflow/forgejo-raft' "$ROOT/scripts/foreign-history.txt"; then PASS=$((PASS+1)); echo "  ok   shipped registry lists kodflow/forgejo-raft"
+else FAIL=$((FAIL+1)); echo "  FAIL shipped registry does not list kodflow/forgejo-raft"; fi
+rm -rf "$FH"
+
 echo "== report sink =="
 # PC_REPORT is what puts the verdict in a pull-request comment. A caller reads
 # the file back, so an empty or missing one silently degrades the comment to
