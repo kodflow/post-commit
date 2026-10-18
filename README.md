@@ -221,6 +221,8 @@ on:
     types: [opened, synchronize, reopened, ready_for_review]
   push:
     branches: [main, master]
+  merge_group:
+    types: [checks_requested]
   workflow_dispatch:
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -271,6 +273,26 @@ still the head. Its logic lives in `block-merge/action.yml`; only its `if:`
 stays in the stub, because a job that never starts is what keeps its
 `pull-requests: write` token away from push, manual and fork runs, and away
 from the gate job.
+
+### Events
+
+| Event | Head | Range (format, secrets, mcp.json) | block-merge |
+|---|---|---|---|
+| `pull_request` | the pull request's head (not GitHub's merge commit) | `base..head`: the pull request's own commits | on failure, same-repository, not draft |
+| `merge_group` | the queue's tip commit, on its `gh-readonly-queue/...` ref | `tip~1..tip`: the tip commit alone — a merge-method tip reaches the entry's commits through its second parent | never |
+| `push`, `workflow_dispatch`, `schedule` | every branch and every tag | none | never |
+
+`merge_group` is in the stub because a repository whose ruleset uses a merge
+queue requires the `post-commit` status on the queue's own ref too, and waits
+for it there: without the trigger, nothing ever reports it and the queue
+stalls. The payload has no `before` and no pull request, so the action takes
+its generic branch — the tip commit alone, `before` ignored even if one ever
+appears — while the identity and attribution checks still read the tip's whole
+ancestry, as everywhere else. No step reads `github.event.pull_request`
+unguarded (`tests/run.sh` pins it), and `block-merge` keeps its
+`pull_request`-only `if:`: a queue entry has no draft state to restore. A
+repository without a merge queue never receives the event, so the trigger
+costs it nothing.
 
 **Why not a reusable workflow.** It would shrink the stub further, and it
 fails on the two things that matter here. A called job reports as
@@ -344,6 +366,22 @@ scripts/enforce.sh --apply --all        # every non-fork, non-archived repo you 
 ```
 
 Idempotent: re-running never duplicates a PR or a ruleset.
+
+A sync pull request (`chore/post-commit`) is a copy of the stub as it was when
+it was opened, so it is never left behind when the stub moves on:
+
+| Default branch | Open sync | Dry-run | `--apply` |
+|---|---|---|---|
+| current | none | `present` | nothing |
+| current | yes | `present:would-close` | closed with its branch: it could only bring an older stub back |
+| drifted | none | `stale:would-sync` | one opened |
+| drifted | on an older stub | `stale:pr-would-update` | rewritten in place, on its own branch (`stale:pr-updated`) |
+| drifted | already current | `stale:pr-open` | nothing |
+
+A stub that is not on the default branch yet behaves the same with
+`would-open-pr` / `pr-open:*`, and its ruleset still waits for the merge. A
+pull-request lookup that fails is an error on a drifted repository, never read
+as "none open", and changes nothing on a current one.
 
 ### When a repository must differ: runner overrides
 

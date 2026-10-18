@@ -13,6 +13,10 @@
 #   workflow.yml    the deployed .github/workflows/post-commit.yml; absent: 404
 #   content_fails   present: downloading that file's content fails
 #   open_pr         a URL: an open pull request exists on the enforce branch
+#   open_pr.fork    a URL: an open pull request from a FORK's branch of the same
+#                   name (listed before open_pr, as cross-repository)
+#   branch.yml      the post-commit.yml that branch (chore/post-commit) carries;
+#                   absent: 404
 #
 #   rt/<file>       a deployed .github/workflows/<file> other than the gate
 #                   (the runner-template stubs); absent: 404
@@ -27,6 +31,7 @@
 #                          request made with GH_TOKEN=<token>; absent: 401
 #
 # For the test to inspect afterwards: put.b64 (the content of a contents PUT),
+# put.branch (the branch that PUT wrote to),
 # pr.body (the body of a pull request it was asked to create), rt-put/<file>
 # and rt-pr.body (the same for the runner-template stubs), pr.closed (the pull
 # request it was asked to close) and tokens.log
@@ -40,13 +45,13 @@ die() { printf 'fake-gh: %s\n' "$*" >&2; exit "${RC:-1}"; }
 unknown() { RC=97 die "unmocked call: gh $ARGS"; }
 ARGS="$*"
 
-jqf=""; method=GET; endpoint=""; content=""; repo=""; body=""; head=""; pos2=""
+jqf=""; method=GET; endpoint=""; content=""; branch=""; repo=""; body=""; head=""; pos2=""
 sub="${1:-}"; shift || true
 while [ $# -gt 0 ]; do
     case "$1" in
         --jq) jqf="$2"; shift ;;
         -X) method="$2"; shift ;;
-        -f|-F) case "$2" in content=*) content="${2#content=}" ;; esac; shift ;;
+        -f|-F) case "$2" in content=*) content="${2#content=}" ;; branch=*) branch="${2#branch=}" ;; esac; shift ;;
         --input) [ "$2" = - ] && cat > /dev/null; shift ;;
         --repo|-R) repo="$2"; shift ;;
         --body) body="$2"; shift ;;
@@ -81,8 +86,12 @@ case "$sub" in
                 if [ "$head" = chore/runner-template ]; then
                     if [ -s "$D/$repo/open_pr.rt" ]; then out "$(jq -n --arg u "$(cat "$D/$repo/open_pr.rt")" '[{url:$u}]')"
                     else out '[]'; fi
-                elif [ -s "$D/$repo/open_pr" ]; then out "$(jq -n --arg u "$(cat "$D/$repo/open_pr")" '[{url:$u}]')"
-                else out '[]'; fi ;;
+                else
+                    list='[]'
+                    [ -s "$D/$repo/open_pr.fork" ] && list="$(jq -c --arg u "$(cat "$D/$repo/open_pr.fork")" '. + [{url:$u, isCrossRepository:true}]' <<< "$list")"
+                    [ -s "$D/$repo/open_pr" ] && list="$(jq -c --arg u "$(cat "$D/$repo/open_pr")" '. + [{url:$u, isCrossRepository:false}]' <<< "$list")"
+                    out "$list"
+                fi ;;
             create)
                 if [ "$head" = chore/runner-template ]; then printf '%s' "$body" > "$D/$repo/rt-pr.body"
                 else printf '%s' "$body" > "$D/$repo/pr.body"; fi
@@ -110,11 +119,14 @@ case "$sub" in
                         [ -s "$R/workflow.yml" ] || die "Not Found (HTTP 404)"
                         [ "$jqf" = .content ] && [ -e "$R/content_fails" ] && die "HTTP 500 (content download failed)"
                         out "$(file_json "$R/workflow.yml")" ;;
-                    ref=chore/post-commit) die "Not Found (HTTP 404)" ;;
+                    ref=chore/post-commit)
+                        [ -s "$R/branch.yml" ] || die "Not Found (HTTP 404)"
+                        out "$(file_json "$R/branch.yml")" ;;
                     *) unknown ;;
                 esac ;;
             "PUT /contents/.github/workflows/post-commit.yml")
-                printf '%s' "$content" > "$R/put.b64"; out '{"content":{}}' ;;
+                printf '%s' "$content" > "$R/put.b64"; printf '%s' "$branch" > "$R/put.branch"
+                out '{"content":{}}' ;;
             "GET /contents/.github/workflows/"*)
                 f="${tail#/contents/.github/workflows/}"
                 case "$query" in
