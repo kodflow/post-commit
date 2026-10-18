@@ -1,0 +1,18 @@
+# Repositories whose history is mostly someone else's — one `owner/name` per
+# line, matched case-insensitively against github.repository. Blank lines and
+# #-comments are ignored.
+#
+# A repository listed here is judged in foreign-history mode (README,
+# "Foreign upstream history"): a commit by none of the `authors` logins is
+# not refused for its authorship, only for a denied identity
+# (denied-identities.txt) or an AI author/committer; the fleet's own commits
+# are held to every rule as usual.
+#
+# The list lives here and nowhere else on purpose. A repository cannot turn
+# the mode on for itself — not from its stub, which enforce.sh keeps
+# identical everywhere, nor from a variable or a job `env:` — so loosening
+# the gate anywhere takes a reviewed change to this repository.
+
+# A fork of Forgejo, recreated as a non-fork: tens of thousands of upstream
+# commits from Codeberg, merged in by the `sync/upstream` pull request.
+kodflow/forgejo-raft

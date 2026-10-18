@@ -1,0 +1,21 @@
+# Identities that must never appear in a commit of a foreign-history
+# repository (foreign-history.txt), wherever they sit: author, committer,
+# trailer or anywhere in the message. Read only in that mode; everywhere else
+# the `authors` allow-list already refuses them, and more.
+#
+# One lowercase hex SHA-256 per line, of either
+#   · a whole address, lowercased:   printf '%s' 'name@example.com' | sha256sum
+#   · a whole domain, `@` included:  printf '%s' '@example.com'     | sha256sum
+# A domain entry refuses every address at that domain. Blank lines and
+# #-comments are ignored.
+#
+# Digests, not addresses: this repository is public, and a list of the
+# addresses it exists to keep out of histories would publish them itself.
+# A digest only confirms an address to someone who already has it.
+
+# The owner's business address.
+991b097049c634d49fd251d678eb54ab08a648da329c8e0a06f861801b163a9c
+# The owner's personal mailbox.
+75874646a454a33bb2e396f700016bd2aef89e3f486daca606f43164d5a091ad
+# Every address at the owner's own domain.
+d37171f3545982947f8be2b536ce0cc9f0ad36228deccdb2729f4d0ec184abc3

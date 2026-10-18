@@ -19,7 +19,9 @@ inputs:
       Space/comma separated GitHub logins allowed to author and commit. Each
       expands to that account's noreply address, with or without the numeric
       id prefix. GitHub's own merge committer and app/bot accounts are always
-      accepted on top. Empty (the default) disables the check.
+      accepted on top. Empty (the default) disables the check. In a repository
+      listed in scripts/foreign-history.txt, these logins tell the fleet's own
+      commits from upstream's, and a deny list replaces the allow-list.
     default: ''
   strict:
     description: Also apply patterns-strict.txt (bare vendor keywords, .claude/ paths).
@@ -160,6 +162,12 @@ runs:
         PC_AGENT_FILES: ${{ inputs.agent_files }}
         PC_AGENT_ALLOW: ${{ inputs.agent_files_allow }}
         PC_REPORT: ${{ runner.temp }}/post-commit-report.md
+        # Foreign-history mode is decided here, from lists in this repository,
+        # never by the caller: set explicitly so a job-level `env:` cannot
+        # point the gate at a list of its own.
+        PC_REPOSITORY: ${{ github.repository }}
+        PC_FOREIGN_REGISTRY: ${{ github.action_path }}/scripts/foreign-history.txt
+        PC_DENY_FILE: ${{ github.action_path }}/scripts/denied-identities.txt
       run: |
         rc=0
         bash "${{ github.action_path }}/scripts/post-commit.sh" \
