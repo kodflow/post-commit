@@ -4,7 +4,10 @@
 #
 # For each target (forks, archived and empty repos are skipped):
 #   1. stub — ensure .github/workflows/post-commit.yml is on the default
-#             branch; if not, ensure a PR adding it is open.
+#             branch; if not, ensure a PR adding it is open. A sync PR already
+#             open is brought up to date in place when the stub has moved
+#             since, and closed once the default branch is current, so no
+#             open PR ever proposes an older stub.
 #   2. rule — ONLY once the stub is on the default branch, ensure a repository
 #             ruleset named "post-commit" targets that branch with:
 #               · required status check `post-commit`, accepted only from
@@ -402,45 +405,79 @@ ensure_stub() {   # -> sets STUB_STATE, PR_URL, STUB_NOTE
         want_b64="$(base64 -w0 < "$want_file")"
     fi
 
-    local deployed verb title
+    local deployed verb title current=""
     deployed="$(gh api "repos/$repo/contents/$STUB_PATH?ref=$db" --jq .sha 2>/dev/null)"
     if [ -n "$deployed" ] && [ "$deployed" = "$want_blob" ]; then
-        STUB_STATE="present"; return
-    fi
+        current="present"
     # Only an overridden repository is allowed to be annotated, and only that
     # case pays for the download the blob-sha comparison above exists to avoid.
     # A download that fails is not evidence of drift: reading it as drift would
     # open a sync, on a guess, that strips the repository's annotations.
-    if [ -n "$deployed" ] && [ -n "$label" ]; then
+    elif [ -n "$deployed" ] && [ -n "$label" ]; then
         if ! gh api "repos/$repo/contents/$STUB_PATH?ref=$db" --jq .content 2>/dev/null \
                 | base64 -d > "$WORKDIR/deployed.yml" 2>/dev/null \
            || [ ! -s "$WORKDIR/deployed.yml" ]; then
             STUB_STATE="error:download"; return
         fi
-        if stub_covered_by "$want_file" "$WORKDIR/deployed.yml"; then
-            STUB_STATE="present:override"; return
-        fi
+        stub_covered_by "$want_file" "$WORKDIR/deployed.yml" && current="present:override"
     fi
-    if [ -n "$deployed" ]; then verb=sync; else verb=add; fi
 
+    # The sync this script may already have opened, and the branch it is on.
+    # Looked up whether or not the repository is current: an open sync is a
+    # copy of the stub as it was when the PR was opened, and a stub that moved
+    # since (kitsunium/sdk#345, which would have taken merge_group back out)
+    # must not be left for someone to merge.
+    local pr_branch="" b lookup=ok
     for b in "$BRANCH" "${LEGACY_BRANCHES[@]}"; do
-        PR_URL="$(gh pr list --repo "$repo" --head "$b" --state open --json url --jq '.[0].url // empty' 2>/dev/null)"
-        [ -n "$PR_URL" ] && { STUB_STATE="pr-open"; return; }
+        PR_URL="$(gh pr list --repo "$repo" --head "$b" --state open --json url --jq '.[0].url // empty' 2>/dev/null)" \
+            || { lookup=failed; PR_URL=""; break; }
+        [ -n "$PR_URL" ] && { pr_branch="$b"; break; }
     done
-    if ! $APPLY; then
-        [ "$verb" = sync ] && STUB_STATE="stale:would-sync" || STUB_STATE="would-open-pr"
+
+    if [ -n "$current" ]; then
+        # Current on the default branch. A failed lookup changes nothing here —
+        # there is nothing to write — and the next run looks again. An open sync
+        # can only bring an obsolete version back, so it is closed.
+        STUB_STATE="$current"
+        [ "$lookup" = ok ] && [ -n "$PR_URL" ] || return
+        if ! $APPLY; then STUB_STATE="$current:would-close"; return; fi
+        gh pr close "$PR_URL" --repo "$repo" --delete-branch \
+            --comment "Closed by kodflow/post-commit's enforce: the default branch already carries the central stub, so this branch could only bring an obsolete version back." \
+            >/dev/null 2>&1 && STUB_STATE="$current:closed-obsolete" || STUB_STATE="$current:close-failed"
         return
     fi
+    # Drifted. A failed lookup is not "none open": read as one, it would open a
+    # second sync next to the first.
+    [ "$lookup" = ok ] || { STUB_STATE="error:pr-lookup"; return; }
+    if [ -n "$deployed" ]; then verb=sync; else verb=add; fi
 
-    sha="$(gh api "repos/$repo/git/ref/heads/$db" --jq .object.sha 2>/dev/null)" || { STUB_STATE="error:no-sha"; return; }
-    gh api "repos/$repo/git/refs" -X POST -f ref="refs/heads/$BRANCH" -f sha="$sha" >/dev/null 2>&1 \
-        || gh api "repos/$repo/git/refs/heads/$BRANCH" >/dev/null 2>&1 \
-        || { STUB_STATE="error:branch"; return; }
-
-    # Updating an existing file needs the blob sha it is replacing, and the one
-    # on the branch is not always the one on the default branch.
-    local onbranch args=()
-    onbranch="$(gh api "repos/$repo/contents/$STUB_PATH?ref=$BRANCH" --jq .sha 2>/dev/null)"
+    # An open sync is brought up to date in place, on the branch it is on,
+    # rather than left carrying the stub it was opened with. The states keep
+    # their family: a sync is `stale:*` (the stub is on the default branch, so
+    # the ruleset is reconciled), an addition `pr-open*` (it is not, so it waits).
+    local onbranch="" args=() target="$BRANCH" pending
+    if [ -n "$PR_URL" ]; then
+        target="$pr_branch"
+        onbranch="$(gh api "repos/$repo/contents/$STUB_PATH?ref=$target" --jq .sha 2>/dev/null)"
+        [ "$verb" = sync ] && pending="stale:pr-" || pending="pr-open:"
+        if [ "$onbranch" = "$want_blob" ]; then
+            [ "$verb" = sync ] && STUB_STATE="stale:pr-open" || STUB_STATE="pr-open"
+            return
+        fi
+        if ! $APPLY; then STUB_STATE="${pending}would-update"; return; fi
+    else
+        if ! $APPLY; then
+            [ "$verb" = sync ] && STUB_STATE="stale:would-sync" || STUB_STATE="would-open-pr"
+            return
+        fi
+        sha="$(gh api "repos/$repo/git/ref/heads/$db" --jq .object.sha 2>/dev/null)" || { STUB_STATE="error:no-sha"; return; }
+        gh api "repos/$repo/git/refs" -X POST -f ref="refs/heads/$BRANCH" -f sha="$sha" >/dev/null 2>&1 \
+            || gh api "repos/$repo/git/refs/heads/$BRANCH" >/dev/null 2>&1 \
+            || { STUB_STATE="error:branch"; return; }
+        # Updating an existing file needs the blob sha it is replacing, and the
+        # one on the branch is not always the one on the default branch.
+        onbranch="$(gh api "repos/$repo/contents/$STUB_PATH?ref=$BRANCH" --jq .sha 2>/dev/null)"
+    fi
     [ -n "$onbranch" ] && args=(-f "sha=$onbranch")
 
     if [ "$verb" = sync ]; then
@@ -449,9 +486,10 @@ ensure_stub() {   # -> sets STUB_STATE, PR_URL, STUB_NOTE
         title="ci: add the mandatory post-commit gate"
     fi
     out="$(gh api "repos/$repo/contents/$STUB_PATH" -X PUT -f message="$title" \
-            -f content="$want_b64" -f branch="$BRANCH" "${args[@]}" 2>&1)" \
+            -f content="$want_b64" -f branch="$target" "${args[@]}" 2>&1)" \
         || { STUB_STATE="error:put:${out:0:60}"; return; }
 
+    if [ -n "$PR_URL" ]; then STUB_STATE="${pending}updated"; return; fi
     if [ "$verb" = sync ]; then
         PR_URL="$(gh pr create --repo "$repo" --base "$db" --head "$BRANCH" --title "$title" \
             --body "$SYNC_BODY${label:+$OVERRIDE_NOTE}${STUB_NOTE:+$REFUSED_NOTE}" 2>&1 | grep -oE 'https://[^ ]+' | head -1)"

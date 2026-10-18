@@ -1,5 +1,6 @@
 Adds `.github/workflows/post-commit.yml`: the mandatory merge gate, run on
-every pull request commit and on every push to the trunk.
+every pull request commit, on every merge-queue entry and on every push
+to the trunk.
 
 It fails when **any commit reachable from the branch** — the new ones and the
 whole history behind them — carries AI attribution (a `Co-authored-by:`

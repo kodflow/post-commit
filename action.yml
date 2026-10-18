@@ -128,6 +128,15 @@ runs:
           exit 0
         else
           HEAD="$SHA"
+          # merge_group lands here on purpose. github.sha is the queue's tip
+          # commit on its gh-readonly-queue/... ref, its whole ancestry is
+          # scanned like any head's, and the range is that tip commit alone:
+          # the payload has no `before` and no pull request (a merge-method
+          # queue's tip is a merge, and `tip~1..tip` still reaches the entry's
+          # own commits through its second parent). `before` is cleared rather
+          # than trusted to be absent, so a payload that ever grows one cannot
+          # widen the range behind the stub's back.
+          [ "$EVENT" = "merge_group" ] && PUSH_BEFORE=""
           # github.event.before is all-zeros for a new branch and points at an
           # orphaned commit after a force-push; neither resolves, so fall back
           # to the tip commit instead of failing the job on a bad range.
@@ -136,7 +145,11 @@ runs:
              && git cat-file -e "${PUSH_BEFORE}^{commit}" 2>/dev/null; then
             RANGE="${PUSH_BEFORE}..${SHA}"
           elif git cat-file -e "${SHA}~1^{commit}" 2>/dev/null; then
-            echo "::notice::no resolvable 'before' commit (new branch or force-push) — range is the tip commit only"
+            if [ "$EVENT" = "merge_group" ]; then
+              echo "::notice::merge queue entry — range is the queue's tip commit only"
+            else
+              echo "::notice::no resolvable 'before' commit (new branch or force-push) — range is the tip commit only"
+            fi
             RANGE="${SHA}~1..${SHA}"
           else
             RANGE=""

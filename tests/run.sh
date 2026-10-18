@@ -1012,6 +1012,111 @@ else
 fi
 rm -rf "$d" "$r"
 
+echo "== merge_group: the queue's tip commit =="
+# The merge queue asks for the required status on its own gh-readonly-queue/...
+# ref. The action's resolve step is lifted out of action.yml as it stands and
+# run as the runner would run it for that event — no `before`, no pull request
+# — then the gate judges the head and range it produced. Not a copy of the
+# logic: a change to the step is exercised here unchanged.
+RESOLVE="$(mktemp)"
+awk '/- name: Resolve head and range$/ { s = 1 }
+     s && /^      run: \|$/ { r = 1; next }
+     r { if ($0 != "" && $0 !~ /^        /) exit; sub(/^        /, ""); print }' "$ROOT/action.yml" > "$RESOLVE"
+mgok() {   # mgok <name> <rc>
+    if [ "$2" -eq 0 ]; then PASS=$((PASS+1)); printf '  ok   %s\n' "$1"
+    else FAIL=$((FAIL+1)); printf '  FAIL %s\n' "$1"; fi
+}
+grep -q 'merge_group' "$RESOLVE" && grep -q 'GITHUB_OUTPUT' "$RESOLVE"
+mgok "the resolve step is read out of action.yml" $?
+KF=(GIT_AUTHOR_NAME=kodflow GIT_AUTHOR_EMAIL=133899878+kodflow@users.noreply.github.com
+    GIT_COMMITTER_NAME=kodflow GIT_COMMITTER_EMAIL=133899878+kodflow@users.noreply.github.com)
+# What the queue writes: the entry's author, GitHub as the committer.
+QUEUE=(GIT_AUTHOR_NAME=kodflow GIT_AUTHOR_EMAIL=133899878+kodflow@users.noreply.github.com
+       GIT_COMMITTER_NAME=GitHub GIT_COMMITTER_EMAIL=noreply@github.com)
+mgrepo() { ( export "${KF[@]}"; mkrepo ); }
+mgcommit() {   # mgcommit <repo> <message> [VAR=value ...]: a commit as the queue writes it
+    local d="$1" m="$2"; shift 2
+    echo "$RANDOM$RANDOM" > "$d/f.txt"; git -C "$d" add -A
+    env "${QUEUE[@]}" "$@" git -C "$d" commit -q -F - <<< "$m"
+}
+mg() {   # mg <name> <want> <repo> [VAR=value ...]: resolve as merge_group, then gate
+    local name="$1" want="$2" repo="$3"; shift 3
+    local o tip head range out rc
+    o="$(mktemp)"; tip="$(git -C "$repo" rev-parse HEAD)"
+    if ! (cd "$repo" && env EVENT=merge_group SHA="$tip" PUSH_BEFORE="${MG_BEFORE:-}" PR_BASE= PR_HEAD= \
+            GITHUB_OUTPUT="$o" bash "$RESOLVE" >/dev/null 2>&1); then
+        FAIL=$((FAIL+1)); printf '  FAIL %s (the resolve step failed)\n' "$name"; rm -rf "$repo" "$o"; return
+    fi
+    head="$(sed -n 's/^head=//p' "$o")"; range="$(sed -n 's/^range=//p' "$o")"; rm -f "$o"
+    if [ "$head" != "$tip" ] || [ "$range" != "$tip~1..$tip" ]; then
+        FAIL=$((FAIL+1)); printf '  FAIL %s (resolved head=%s range=%s, want the tip and tip~1..tip)\n' "$name" "$head" "$range"
+        rm -rf "$repo"; return
+    fi
+    out="$(cd "$repo" && env GITHUB_STEP_SUMMARY=/dev/null PC_AUTHORS=kodflow "$@" bash "$GATE" "$head" "$range" 2>&1)"; rc=$?
+    if [ "$rc" -eq "$want" ]; then PASS=$((PASS+1)); printf '  ok   %s\n' "$name"
+    else FAIL=$((FAIL+1)); printf '  FAIL %s (want exit %s, got %s)\n%s\n' "$name" "$want" "$rc" "$(printf '%s' "$out" | sed 's/^/       /')"; fi
+    rm -rf "$repo"
+}
+
+d=$(mgrepo); mgcommit "$d" "feat(api): add pagination (#12)"
+mg "squash tip by an allowed author, GitHub committing: clean" 0 "$d"
+
+d=$(mgrepo); mgcommit "$d" "feat: thing (#12)
+
+Co-authored-by: Claude <noreply@anthropic.com>"
+mg "tip carrying an assistant trailer: refused" 1 "$d"
+
+d=$(mgrepo); mgcommit "$d" "feat: thing (#12)" GIT_AUTHOR_NAME=Claude GIT_AUTHOR_EMAIL=noreply@anthropic.com
+mg "tip authored as an assistant: refused" 1 "$d"
+
+d=$(mgrepo); mgcommit "$d" "feat: thing (#12)" GIT_AUTHOR_NAME=Dev GIT_AUTHOR_EMAIL=dev@example.com
+mg "tip authored by a personal identity: refused" 1 "$d"
+
+d=$(mgrepo); mgcommit "$d" "update stuff (#12)"
+mg "tip with a non-conventional subject: refused" 1 "$d"
+
+d=$(mgrepo); echo '{}' > "$d/.mcp.json"; mgcommit "$d" "chore: add mcp config (#13)"
+mg "tip adding .mcp.json: refused" 1 "$d"
+
+# A merge-method queue: the tip is a merge, and tip~1..tip still reaches the
+# entry's own commits through the second parent.
+d=$(mgrepo)
+git -C "$d" checkout -q -b topic
+echo t > "$d/t.txt"; git -C "$d" add -A; env "${KF[@]}" git -C "$d" commit -qm "update stuff"
+git -C "$d" checkout -q main
+env "${QUEUE[@]}" git -C "$d" merge -q --no-ff topic -m "Merge pull request #14 from kodflow/topic"
+mg "merge-method tip: the entry's own subjects are checked" 1 "$d"
+
+# The range is the tip, the history is still the head's whole ancestry.
+d=$(mgrepo); mgcommit "$d" "fix: earlier
+
+Generated with Claude"
+mgcommit "$d" "feat: later (#15)"
+mg "a tainted ancestor of the queue's tip: refused" 1 "$d"
+
+# `before` is never trusted on this event: a stale one would widen the range to
+# a subject already on main that the format check has no business re-reading.
+d=$(mgrepo); MG_BEFORE="$(git -C "$d" rev-parse HEAD)"
+mgcommit "$d" "old subject on main"
+mgcommit "$d" "feat: the entry (#16)"
+mg "a 'before' in the payload is ignored: the range is the tip alone" 0 "$d"
+unset MG_BEFORE
+rm -f "$RESOLVE"
+
+# Nothing on this event may read the pull request unguarded, and block-merge
+# stays a pull_request job: a queue entry has no draft to restore.
+STUBF="$ROOT/stub/post-commit.yml"
+grep -A1 -x '  merge_group:' "$STUBF" | grep -qx '    types: \[checks_requested\]'
+mgok "the stub triggers on merge_group checks_requested" $?
+grep -qx "          && github.event_name == 'pull_request'" "$STUBF"
+mgok "block-merge still runs on pull_request only" $?
+n="$(grep 'github\.event\.pull_request' "$ROOT/action.yml" \
+      | grep -vF -e 'PR_BASE: ${{ github.event.pull_request.base.sha }}' \
+                 -e 'PR_HEAD: ${{ github.event.pull_request.head.sha }}' \
+                 -e "\${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}" \
+      | wc -l | tr -d ' ')"
+mgok "action.yml reads the pull request only where it is guarded or harmless" $(( n == 0 ? 0 : 1 ))
+
 echo "== enforce: selftest =="
 if out="$(bash "$ROOT/scripts/enforce.sh" --selftest 2>&1)"; then
     PASS=$((PASS+1)); printf '  ok   enforce.sh --selftest\n'
@@ -1129,6 +1234,59 @@ grep -q 'stub=error:visibility ' <<< "$EOUT"; eok "visibility unreadable: an err
 fx="$(efx supervizio/agent private "$ANNOTATED" content_fails)"; EOUT="$(erun "$fx" --apply supervizio/agent)"
 grep -q 'stub=error:download ' <<< "$EOUT"; eok "deployed file unreadable: an error, not drift" $?
 ! grep -qE -- '-X PUT|^pr create' "$fx/calls.log"; eok "...no write, no pull request" $?
+
+# An open sync is a copy of the stub as it was when it was opened. When the stub
+# moves on — merge_group was added after kitsunium/sdk#345 was opened, and that
+# PR would have taken it back out — the open sync is brought up to date in
+# place, and once the default branch is current it is closed, never left for
+# someone to merge.
+OLDSTUB="$(mktemp)"
+awk '/^  # The merge queue requires/ { skip = 1 }
+     skip && /^  merge_group:$/ { getline; skip = 0; next }
+     !skip' "$STUB" > "$OLDSTUB"
+n=$(( $(wc -l < "$STUB") - $(wc -l < "$OLDSTUB") ))
+eok "the fixture is the stub before merge_group, eight lines shorter" $(( n == 8 ? 0 : 1 ))
+OPEN=https://github.com/someone-else/some-repo/pull/345
+sfx() {   # sfx <deployed-file|-> [branch-file|-] [flag-file...]: an open sync on chore/post-commit
+    local d deployed="$1" br="${2:--}"; shift; [ $# -gt 0 ] && shift
+    d="$(efx someone-else/some-repo private "$deployed" "$@")"
+    printf '%s' "$OPEN" > "$d/someone-else/some-repo/open_pr"
+    [ "$br" = - ] || cp "$br" "$d/someone-else/some-repo/branch.yml"
+    printf '%s' "$d"
+}
+
+fx="$(sfx "$STUB" "$OLDSTUB")"; EOUT="$(erun "$fx" someone-else/some-repo)"
+grep -q 'stub=present:would-close ' <<< "$EOUT"; eok "current, an obsolete sync open, dry-run: would close it" $?
+! grep -q '^pr close' "$fx/calls.log"; eok "...and does not" $?
+fx="$(sfx "$STUB" "$OLDSTUB")"; EOUT="$(erun "$fx" --apply someone-else/some-repo)"
+grep -q 'stub=present:closed-obsolete ' <<< "$EOUT" && [ "$(cat "$fx/someone-else/some-repo/pr.closed")" = "$OPEN" ]
+eok "current, an obsolete sync open, --apply: closed" $?
+grep -q -- "^pr close $OPEN --repo someone-else/some-repo .*--delete-branch" "$fx/calls.log"; eok "...with its branch deleted" $?
+grep -q 'rule=synced' <<< "$EOUT"; eok "...and the ruleset still reconciled" $?
+
+fx="$(sfx "$OLDSTUB" "$OLDSTUB")"; EOUT="$(erun "$fx" someone-else/some-repo)"
+grep -q 'stub=stale:pr-would-update ' <<< "$EOUT"; eok "drift, a sync open on an older stub, dry-run: would update it" $?
+! grep -qE -- '-X PUT|^pr create' "$fx/calls.log"; eok "...and writes nothing" $?
+fx="$(sfx "$OLDSTUB" "$OLDSTUB")"; EOUT="$(erun "$fx" --apply someone-else/some-repo)"
+grep -q 'stub=stale:pr-updated ' <<< "$EOUT"; eok "drift, a sync open on an older stub, --apply: updated in place" $?
+cmp -s "$(put "$fx" someone-else/some-repo)" "$STUB" && [ "$(cat "$fx/someone-else/some-repo/put.branch")" = chore/post-commit ]
+eok "...the stub written byte for byte, on the sync's own branch" $?
+! grep -qE '^pr create|git/refs -X POST' "$fx/calls.log"; eok "...no second pull request, no new branch" $?
+grep -q 'rule=synced' <<< "$EOUT"; eok "...and the ruleset reconciled: the stub is on the default branch" $?
+
+fx="$(sfx "$OLDSTUB" "$STUB")"; EOUT="$(erun "$fx" --apply someone-else/some-repo)"
+grep -q 'stub=stale:pr-open ' <<< "$EOUT"; eok "drift, a sync open that is already current: left as it is" $?
+! grep -q -- '-X PUT' "$fx/calls.log"; eok "...nothing written" $?
+
+fx="$(sfx - "$OLDSTUB")"; EOUT="$(erun "$fx" --apply someone-else/some-repo)"
+grep -q 'stub=pr-open:updated ' <<< "$EOUT"; eok "no stub yet, its pull request on an older stub: updated" $?
+grep -q 'rule=deferred:stub-not-merged' <<< "$EOUT"; eok "...and the ruleset still waits for it" $?
+
+fx="$(sfx "$OLDSTUB" - pr_list_fails)"; EOUT="$(erun "$fx" --apply someone-else/some-repo)"
+grep -q 'stub=error:pr-lookup ' <<< "$EOUT"; eok "drift, the pull request lookup failing: an error, not 'none open'" $?
+! grep -qE -- '-X PUT|^pr create' "$fx/calls.log"; eok "...no write, no second pull request" $?
+fx="$(sfx "$STUB" - pr_list_fails)"; EOUT="$(erun "$fx" --apply someone-else/some-repo)"
+grep -q 'stub=present ' <<< "$EOUT"; eok "current, the lookup failing: still present, nothing to write" $?
 
 # An App installation token reaches one owner's repositories and nothing else,
 # so the workflow hands over one per owner. Each repository must be served with
