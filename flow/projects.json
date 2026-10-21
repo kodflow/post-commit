@@ -1,0 +1,207 @@
+{
+  "policy": {
+    "version": 1,
+    "gate_app_id": 5136597,
+    "merger_app_id": 5136597,
+    "gate_bot_login": "kodflow-ci[bot]",
+    "promotion_checks": [
+      "ci-lint",
+      "ci-unit",
+      "ci-heavy"
+    ],
+    "check_sources": {
+      "ci-lint": 15368,
+      "ci-unit": 15368,
+      "ci-heavy": 15368
+    },
+    "reviewers": {
+      "qodo": {
+        "soft": {
+          "files": 80,
+          "lines": 2000,
+          "patch_bytes": 64000,
+          "largest_patch_bytes": 16000
+        },
+        "hard": {
+          "files": 100,
+          "lines": 2500,
+          "patch_bytes": 80000,
+          "largest_patch_bytes": 20000
+        },
+        "exclude": [
+          "**/go.sum",
+          "go.sum",
+          "**/Cargo.lock",
+          "Cargo.lock",
+          "**/MODULE.bazel.lock",
+          "MODULE.bazel.lock",
+          "**/*.pb.go"
+        ]
+      },
+      "coderabbit": {
+        "soft": {
+          "files": 80,
+          "lines": 2000,
+          "patch_bytes": 64000,
+          "largest_patch_bytes": 16000
+        },
+        "hard": {
+          "files": 100,
+          "lines": 2500,
+          "patch_bytes": 80000,
+          "largest_patch_bytes": 20000
+        },
+        "exclude": [
+          "**/go.sum",
+          "go.sum",
+          "**/Cargo.lock",
+          "Cargo.lock",
+          "**/MODULE.bazel.lock",
+          "MODULE.bazel.lock",
+          "**/*.pb.go"
+        ]
+      }
+    }
+  },
+  "projects": {
+    "kodflow/post-commit": {
+      "workflow": ".github/workflows/ci.yml",
+      "source_sha": "1083d784f24aed9e4379b39592177228e11ab543",
+      "advisory_jobs": [
+        "test",
+        "post-commit"
+      ],
+      "lanes": {
+        "lint": [
+          "test"
+        ],
+        "unit": [
+          "test"
+        ],
+        "heavy": [
+          "test"
+        ]
+      }
+    },
+    "kodflow/ktn-linter": {
+      "workflow": ".github/workflows/ci.yml",
+      "source_sha": "70c93bb179a0a49512d9cd14c35773addb4712a5",
+      "advisory_jobs": [
+        "bazel-test",
+        "security",
+        "webui-js"
+      ],
+      "advisory_matrix": {
+        "bazel-test": {
+          "lane": [
+            "test",
+            "lint"
+          ]
+        }
+      },
+      "lanes": {
+        "lint": [
+          "bazel-test",
+          "security"
+        ],
+        "unit": [
+          "bazel-test",
+          "webui-js"
+        ],
+        "heavy": [
+          "licence-e2e",
+          "licence-origins",
+          "macos-license",
+          "windows-license",
+          "native"
+        ]
+      }
+    },
+    "supervizio/agent": {
+      "workflow": ".github/workflows/ci.yml",
+      "source_sha": "01d59f16b45f3e9c9604af4920c8f1cc2c2a7978",
+      "advisory_jobs": [
+        "go-test",
+        "scripts-test",
+        "go-lint"
+      ],
+      "advisory_allowed_dependencies": [
+        "changes",
+        "go-test",
+        "scripts-test",
+        "go-lint"
+      ],
+      "advisory_matrix": {
+        "go-test": {
+          "libprobe": [
+            "frozen"
+          ]
+        }
+      },
+      "lanes": {
+        "lint": [
+          "go-lint"
+        ],
+        "unit": [
+          "go-test",
+          "scripts-test"
+        ],
+        "heavy": [
+          "summary"
+        ]
+      }
+    },
+    "supervizio/libprobe": {
+      "workflow": ".github/workflows/ci.yml",
+      "source_sha": "0e08d4f622363c357e00bc903c88c8bb99d8ad85",
+      "advisory_jobs": [
+        "lint",
+        "test"
+      ],
+      "advisory_allowed_dependencies": [
+        "changes",
+        "lint",
+        "test"
+      ],
+      "lanes": {
+        "lint": [
+          "lint"
+        ],
+        "unit": [
+          "test"
+        ],
+        "heavy": [
+          "summary"
+        ]
+      }
+    },
+    "kitsunium/sdk": {
+      "workflow": ".github/workflows/bazel-ci.yml",
+      "source_sha": "e699f42e70f11cb6eb91c71c8d79fc7e65c7c96b",
+      "preserve_push": true,
+      "advisory_jobs": [
+        "bazel",
+        "lint-ktn",
+        "shell-gates",
+        "models"
+      ],
+      "lanes": {
+        "lint": [
+          "lint-ktn",
+          "shell-gates"
+        ],
+        "unit": [
+          "bazel"
+        ],
+        "heavy": [
+          "cross-build",
+          "test-386",
+          "docs-site"
+        ]
+      },
+      "include_workflows": {
+        ".github/workflows/e2e-cross.yml": "ea2465c6f500962aca1e3e4805ee7ac8bd92cbc0"
+      }
+    }
+  }
+}

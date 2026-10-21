@@ -1,120 +1,94 @@
-# Fleet enforcement from GitHub itself, authenticated as the GitHub App
-# kodflow-ci — the default GITHUB_TOKEN cannot touch other repositories. Needs
-# the variable CI_APP_CLIENT_ID and the secret CI_APP_PRIVATE_KEY on this
-# repository, and the app installed on every owner below.
-#
-# An installation token reaches ONE owner's repositories, so one is minted per
-# owner and handed to enforce.sh as FLEET_TOKEN_<OWNER>; FLEET_OWNERS is the
-# list, and adding an owner means a step here and a word there. Each token
-# covers all of its owner's repositories (enforce.sh visits them all) with
-# only what enforce.sh does: contents + workflows to write the stub (a file
-# under .github/workflows), pull-requests to open the sync, administration to
-# read and write the rulesets. Tokens last an hour, well over a run.
 name: enforce
-
-on:
-  # Self-healing. A ruleset is not protected by anything — an admin can delete
-  # it, weaken it, or put a bypass actor back, and nothing reports that. The
-  # gate would keep running and keep reporting while quietly no longer being
-  # required. Reconciling on a schedule turns that from a silent hole into a
-  # window of at most a day, and the run's summary shows what it had to repair.
+'on':
   schedule:
-    - cron: '17 4 * * *'
+  - cron: 17 4 * * *
   workflow_dispatch:
     inputs:
       targets:
-        description: "'--all' or space-separated owner/repo list"
-        default: '--all'
+        description: '''--all'' or space-separated owner/repo list'
+        default: --all
       apply:
         description: Apply changes (otherwise dry-run)
         type: boolean
         default: false
-
 permissions:
   contents: read
-
 jobs:
   enforce:
     runs-on: ubuntu-latest
     env:
       FLEET_OWNERS: kodflow kodmain kitsunium supervizio
     steps:
-      - uses: actions/checkout@v7
-      - name: token for kodflow
-        id: token-kodflow
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-        with:
-          client-id: ${{ vars.CI_APP_CLIENT_ID }}
-          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
-          owner: kodflow
-          permission-administration: write
-          permission-contents: write
-          permission-pull-requests: write
-          permission-workflows: write
-      - name: token for kodmain
-        id: token-kodmain
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-        with:
-          client-id: ${{ vars.CI_APP_CLIENT_ID }}
-          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
-          owner: kodmain
-          permission-administration: write
-          permission-contents: write
-          permission-pull-requests: write
-          permission-workflows: write
-      - name: token for kitsunium
-        id: token-kitsunium
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-        with:
-          client-id: ${{ vars.CI_APP_CLIENT_ID }}
-          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
-          owner: kitsunium
-          permission-administration: write
-          permission-contents: write
-          permission-pull-requests: write
-          permission-workflows: write
-      - name: token for supervizio
-        id: token-supervizio
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-        with:
-          client-id: ${{ vars.CI_APP_CLIENT_ID }}
-          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
-          owner: supervizio
-          permission-administration: write
-          permission-contents: write
-          permission-pull-requests: write
-          permission-workflows: write
-      - name: enforce
-        env:
-          FLEET_TOKEN_KODFLOW: ${{ steps.token-kodflow.outputs.token }}
-          FLEET_TOKEN_KODMAIN: ${{ steps.token-kodmain.outputs.token }}
-          FLEET_TOKEN_KITSUNIUM: ${{ steps.token-kitsunium.outputs.token }}
-          FLEET_TOKEN_SUPERVIZIO: ${{ steps.token-supervizio.outputs.token }}
-          TARGETS: ${{ inputs.targets || '--all' }}
-          APPLY: ${{ github.event_name == 'schedule' && 'true' || inputs.apply }}
-        run: |
-          # shellcheck disable=SC2086 — TARGETS is a deliberate word list
-          bash scripts/enforce.sh $([ "$APPLY" = "true" ] && echo --apply) --report "$GITHUB_STEP_SUMMARY" $TARGETS
+    - uses: actions/checkout@v7
+    - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+      with:
+        python-version: '3.13'
+    - name: flow migration tooling
+      run: python -m pip install --disable-pip-version-check -r flow/requirements.txt
+    - name: token for kodflow
+      id: token-kodflow
+      uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1
+      with:
+        client-id: ${{ vars.CI_APP_CLIENT_ID }}
+        private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+        owner: kodflow
+        permission-administration: write
+        permission-contents: write
+        permission-pull-requests: write
+        permission-workflows: write
+    - name: token for kodmain
+      id: token-kodmain
+      uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1
+      with:
+        client-id: ${{ vars.CI_APP_CLIENT_ID }}
+        private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+        owner: kodmain
+        permission-administration: write
+        permission-contents: write
+        permission-pull-requests: write
+        permission-workflows: write
+    - name: token for kitsunium
+      id: token-kitsunium
+      uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1
+      with:
+        client-id: ${{ vars.CI_APP_CLIENT_ID }}
+        private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+        owner: kitsunium
+        permission-administration: write
+        permission-contents: write
+        permission-pull-requests: write
+        permission-workflows: write
+    - name: token for supervizio
+      id: token-supervizio
+      uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1
+      with:
+        client-id: ${{ vars.CI_APP_CLIENT_ID }}
+        private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+        owner: supervizio
+        permission-administration: write
+        permission-contents: write
+        permission-pull-requests: write
+        permission-workflows: write
+    - name: enforce
+      env:
+        FLEET_TOKEN_KODFLOW: ${{ steps.token-kodflow.outputs.token }}
+        FLEET_TOKEN_KODMAIN: ${{ steps.token-kodmain.outputs.token }}
+        FLEET_TOKEN_KITSUNIUM: ${{ steps.token-kitsunium.outputs.token }}
+        FLEET_TOKEN_SUPERVIZIO: ${{ steps.token-supervizio.outputs.token }}
+        TARGETS: ${{ inputs.targets || '--all' }}
+        APPLY: ${{ github.event_name == 'schedule' && 'true' || inputs.apply }}
+      run: '# shellcheck disable=SC2086 — TARGETS is a deliberate word list
 
-      # The reconciliation above puts rulesets back; this says whether the fleet
-      # actually ends up enforced, which is not the same question. A repository
-      # can carry a ruleset and still be bypassable, and one on a Free-plan org
-      # cannot carry one at all.
-      - name: audit
-        if: always()
-        env:
-          FLEET_TOKEN_KODFLOW: ${{ steps.token-kodflow.outputs.token }}
-          FLEET_TOKEN_KODMAIN: ${{ steps.token-kodmain.outputs.token }}
-          FLEET_TOKEN_KITSUNIUM: ${{ steps.token-kitsunium.outputs.token }}
-          FLEET_TOKEN_SUPERVIZIO: ${{ steps.token-supervizio.outputs.token }}
-          TARGETS: ${{ inputs.targets || '--all' }}
-        run: |
-          {
-            echo ""
-            echo "## enforcement audit"
-            echo ""
-            echo '```'
-            # shellcheck disable=SC2086
-            bash scripts/enforce.sh --audit $TARGETS
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
+        bash scripts/enforce.sh --flow $([ "$APPLY" = "true" ] && echo --apply) --report "$GITHUB_STEP_SUMMARY" $TARGETS
+
+        '
+    - name: audit
+      if: always()
+      env:
+        FLEET_TOKEN_KODFLOW: ${{ steps.token-kodflow.outputs.token }}
+        FLEET_TOKEN_KODMAIN: ${{ steps.token-kodmain.outputs.token }}
+        FLEET_TOKEN_KITSUNIUM: ${{ steps.token-kitsunium.outputs.token }}
+        FLEET_TOKEN_SUPERVIZIO: ${{ steps.token-supervizio.outputs.token }}
+        TARGETS: ${{ inputs.targets || '--all' }}
+      run: "{\n  echo \"\"\n  echo \"## enforcement audit\"\n  echo \"\"\n  echo '```'\n  # shellcheck disable=SC2086\n  bash\
+        \ scripts/enforce.sh --audit $TARGETS\n  echo '```'\n} >> \"$GITHUB_STEP_SUMMARY\"\n"
