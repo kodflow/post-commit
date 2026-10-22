@@ -57,6 +57,15 @@ def validate_policy(policy):
         raise ValueError("every promotion check requires its expected GitHub App ID")
     positive_integer(policy.get("gate_app_id"), "gate_app_id")
     positive_integer(policy.get("merger_app_id"), "merger_app_id")
+    if "external_e2e" in policy:
+        spec = policy["external_e2e"]
+        keys = {"job_id", "dispatch_job", "context", "bot_login", "repository", "workflow"}
+        if set(spec) != keys or any(not isinstance(v, str) or not v for v in spec.values()):
+            raise ValueError("external_e2e requires explicit dispatch, status and workflow identities")
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", spec["repository"]):
+            raise ValueError("invalid external E2E repository")
+        if not re.fullmatch(r"\.github/workflows/[A-Za-z0-9_.-]+\.ya?ml", spec["workflow"]):
+            raise ValueError("invalid external E2E workflow")
     return policy
 
 

@@ -1,6 +1,6 @@
 import unittest
 
-from flow_migrate import combine_workflows, configure_reviewers, migrate_workflow, parse_workflow
+from flow_migrate import combine_workflows, configure_reviewers, migrate_workflow, migrate_graph_validator, parse_workflow
 
 
 SOURCE = """name: CI
@@ -40,6 +40,23 @@ def spec():
 
 
 class MigrationTests(unittest.TestCase):
+    def test_validator_checks_preserved_project_graph_and_refuses_drift(self):
+        text = 'def check(read):\n    ci = read(".github/workflows/ci.yml")\n    return ci\n'
+        migrated = migrate_graph_validator(text, ".github/workflows/ci.yml", ".github/flow-source/ci.yml")
+        namespace = {}
+        exec(migrated, namespace)
+        files = {".github/flow-source/ci.yml": SOURCE,
+                 ".github/workflows/ci.yml": migrate_workflow(SOURCE, spec())[0]}
+        self.assertEqual(namespace["check"](files.__getitem__), SOURCE)
+        with self.assertRaises(ValueError):
+            migrate_graph_validator(text.replace("ci.yml", "other.yml"), ".github/workflows/ci.yml", "backup")
+
+    def test_external_checkout_ref_uses_exact_merge_candidate(self):
+        source = SOURCE.replace("- run: make e2e", "- run: dispatch\n        env:\n          REF: ${{ github.head_ref || github.ref_name }}")
+        profile = spec() | {"external_e2e": {"job_id": "e2e"}}
+        full, _ = migrate_workflow(source, profile)
+        self.assertEqual(parse_workflow(full)["jobs"]["e2e"]["steps"][0]["env"]["REF"], "${{ github.sha }}")
+
     def test_release_dependency_can_retain_original_push_qualification(self):
         profile = spec()
         profile["preserve_push"] = True

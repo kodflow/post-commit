@@ -78,6 +78,13 @@ def combine_workflows(primary_text, included):
     return dump_workflow(primary), added
 
 
+def migrate_graph_validator(text, source_path, backup):
+    original = 'ci = read("' + source_path + '")'
+    if text.count(original) != 1:
+        raise ValueError("unsupported project graph validator")
+    return text.replace(original, 'ci = read("' + backup + '")')
+
+
 def main_events(workflow, *, preserve_push=False):
     """Keep manual/reusable/tag events; restrict automatic qualification to main PRs."""
     events = workflow.get("on", {})
@@ -129,6 +136,11 @@ def migrate_workflow(text, spec):
             return [candidate_refs(item) for item in value]
         return value
     full = candidate_refs(full)
+    if spec.get("external_e2e"):
+        dispatch = full["jobs"][spec["external_e2e"]["job_id"]]
+        for step in dispatch.get("steps", []):
+            if "REF" in step.get("env", {}):
+                step["env"]["REF"] = "${{ github.sha }}"
     for job_name, job in full["jobs"].items():
         if job_name != "post-commit":
             job["needs"] = list(dict.fromkeys(["flow-candidate", *dependencies(job)]))

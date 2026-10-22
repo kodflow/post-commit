@@ -53,6 +53,13 @@ class ControllerTests(unittest.TestCase):
         policy = example_policy() | {"qualification_workflow": ".github/workflows/ci.yml"}
         self.assertEqual(validation_receipt(api, "a/b", self.pr(), policy)[1], "validation-running")
 
+    def test_green_local_summaries_do_not_bypass_external_e2e(self):
+        api = ValidationAPI()
+        policy = example_policy() | {"qualification_workflow": ".github/workflows/ci.yml", "external_e2e": {"context": "external"}}
+        with patch("flow_controller.external_e2e_receipt", return_value="external-e2e-not-completed") as gate:
+            self.assertEqual(validation_receipt(api, "a/b", self.pr(), policy), ({}, "external-e2e-not-completed"))
+            self.assertEqual(gate.call_args.args[2], "m")
+
     def test_duplicate_or_skipped_summary_is_not_success(self):
         api = ValidationAPI()
         api.jobs[0]["conclusion"] = "skipped"

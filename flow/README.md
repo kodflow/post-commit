@@ -46,6 +46,17 @@ CI uploads a tiny candidate artifact identifying PR, head, base, merge SHA, run
 and attempt. Stale metadata, missing/duplicate summaries, and failed, cancelled,
 neutral or skipped required jobs cannot qualify a promotion.
 
+For agent, the controller also waits for the trusted `e2e/runner-template`
+aggregate on the exact merge SHA. It verifies the external workflow run and
+its freshness against the current CI attempt. Dispatch acceptance is insufficient.
+An explicitly skipped dispatch is accepted only when the authored change detector
+determined that no family needed building. External checkouts use the merge SHA.
+
+Agent's project graph validator reads the preserved authored workflow under
+.github/flow-source; it continues validating project-owned tables and their graph.
+The generated wrapper graph is guarded by managed-file hashes and migration tests.
+Validator source drift blocks rollout until the pinned profile is reviewed.
+
 After all CI succeeds and the diff fits hard limits, the controller requests
 one full CodeRabbit review and one Qodo review per head/base pair. Vendor push
 triggers are disabled. Polling does not repeat requests or enable paid overflow.

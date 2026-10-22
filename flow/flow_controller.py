@@ -24,6 +24,7 @@ from flow_git import GitError, Repository
 from flow_policy import limits, load_policy
 from flow_paths import excluded
 from flow_reviews import evidence
+from flow_evidence import timestamp
 
 
 def blob_sha(content):
@@ -120,7 +121,37 @@ def validation_receipt(api, repo, pr, policy):
         # A missing or duplicate summary must not accidentally validate a lane.
         if len(matches) == 1 and matches[0]["status"] == "completed":
             result[context] = matches[0]["conclusion"]
+    if policy.get("external_e2e") and all(result.get(c) == "success" for c in policy["promotion_checks"]):
+        error = external_e2e_receipt(api, repo, pr["merge_commit_sha"], run, jobs, policy["external_e2e"])
+        if error:
+            return {}, error
     return result, ""
+
+
+def external_e2e_receipt(api, repo, merge, source_run, jobs, spec):
+    dispatch = [job for job in jobs if job["name"] == spec["dispatch_job"]]
+    if len(dispatch) != 1 or dispatch[0].get("conclusion") not in {"success", "skipped"}:
+        return "external-e2e-dispatch-incomplete"
+    if dispatch[0]["conclusion"] == "skipped":
+        return ""  # Authored change detector determined that no family was built.
+    statuses = api.pages(f"repos/{repo}/commits/{merge}/statuses")
+    matches = [s for s in statuses if s["context"] == spec["context"]
+               and (s.get("creator") or {}).get("login") == spec["bot_login"]]
+    if not matches:
+        return "external-e2e-not-completed"
+    latest = max(matches, key=lambda s: s["id"])
+    cutoff = timestamp(source_run.get("run_started_at") or source_run["created_at"])
+    if latest["state"] != "success" or timestamp(latest["created_at"]) < cutoff:
+        return "external-e2e-not-successful"
+    match = re.fullmatch(r"https://github.com/" + re.escape(spec["repository"]) + r"/actions/runs/([0-9]+)", latest.get("target_url") or "")
+    if not match:
+        return "external-e2e-invalid-origin"
+    run = api.request("GET", f"repos/{spec['repository']}/actions/runs/{match[1]}")
+    if (run.get("event") != "repository_dispatch" or run.get("path", "").split("@")[0] != spec["workflow"]
+            or run.get("status") != "completed" or run.get("conclusion") != "success"
+            or timestamp(run["created_at"]) < cutoff):
+        return "external-e2e-run-incomplete"
+    return ""
 
 
 class Controller:

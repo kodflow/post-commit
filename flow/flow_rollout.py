@@ -12,7 +12,7 @@ from pathlib import Path
 
 from flow_api import APIError, GitHub, reconcile_rules, repository_name
 from flow_controller import blob_sha, contents
-from flow_migrate import combine_workflows, configure_reviewers, main_events, migrate_workflow, parse_workflow, dump_workflow
+from flow_migrate import combine_workflows, configure_reviewers, main_events, migrate_workflow, migrate_graph_validator, parse_workflow, dump_workflow
 from flow_policy import rulesets, validate_policy
 
 
@@ -81,6 +81,19 @@ def migration_files(api, repo, default_policy, spec):
                                    optional_file(api, repo, ".pr_agent.toml"))
     files = {**included_files, backup: source, source_path: full, ".github/workflows/flow-advisory.yml": advisory,
              ".coderabbit.yaml": cr, ".pr_agent.toml": qodo}
+    if spec.get("graph_validator"):
+        validator = spec["graph_validator"]
+        path = validator["path"]
+        saved = ".github/flow-source/" + path.rsplit("/", 1)[1]
+        text = optional_file(api, repo, saved)
+        if text is None:
+            text = optional_file(api, repo, path)
+        if text is None or blob_sha(text) != validator["source_sha"]:
+            raise ValueError("project graph validator changed; review its migration")
+        # Project tables describe the authored graph; generated wrapper jobs
+        # are protected separately by managed_files and tested by this migrator.
+        files[saved] = text
+        files[path] = migrate_graph_validator(text, source_path, backup)
     # Existing secondary PR validations also move to promotion, preserving
     # their authored jobs. They need not run on every integration PR.
     listing = api.request("GET", f"repos/{repo}/contents/.github/workflows?ref=main")
@@ -101,6 +114,8 @@ def migration_files(api, repo, default_policy, spec):
             main_events(workflow)
             files[path] = dump_workflow(workflow)
     policy = copy.deepcopy(default_policy)
+    if spec.get("external_e2e"):
+        policy["external_e2e"] = copy.deepcopy(spec["external_e2e"])
     import yaml, tomllib
     from flow_migrate import WorkflowLoader
     cr_config = yaml.load(cr, Loader=WorkflowLoader)

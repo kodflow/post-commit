@@ -929,6 +929,16 @@ if $AUDIT; then
         # gap invents work that does not exist.
         [ -n "$db" ] || { printf '%-40s %-8s %-10s %-12s %s\n' "$repo" - empty - -; continue; }
         total=$((total + 1))
+        if $FLOW; then
+            flow_registry="$SCRIPT_DIR/../flow/projects.json"
+            if python3 -c 'import json,sys; sys.exit(sys.argv[2] not in json.load(open(sys.argv[1]))["projects"])' "$flow_registry" "$repo"; then
+                if ! python3 "$SCRIPT_DIR/../flow/flow_rollout.py" --registry "$flow_registry" --audit -- "$repo"; then
+                    FLEET_ERRORS+=("$repo: flow audit failed")
+                fi
+            else
+                FLEET_ERRORS+=("$repo: flow profile missing")
+            fi
+        fi
         vis="$(gh api "repos/$repo" --jq 'if .private then "private" else "public" end' 2>/dev/null)"
         if gh api "repos/$repo/contents/$STUB_PATH?ref=$db" --jq .content >/dev/null 2>&1 \
            || [ "$repo" = "$SELF_REPO" ]; then wf=yes; else wf=NO; fi

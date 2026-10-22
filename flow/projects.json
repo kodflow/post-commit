@@ -120,6 +120,18 @@
     "supervizio/agent": {
       "workflow": ".github/workflows/ci.yml",
       "source_sha": "01d59f16b45f3e9c9604af4920c8f1cc2c2a7978",
+      "graph_validator": {
+        "path": ".github/scripts/ci_changes.py",
+        "source_sha": "f2c73a27616803d240df3a4c0194d32f834e5b32"
+      },
+      "external_e2e": {
+        "job_id": "dispatch-e2e",
+        "dispatch_job": "P7 Dispatch External E2E",
+        "context": "e2e/runner-template",
+        "bot_login": "kodflow-ci[bot]",
+        "repository": "supervizio/runner-template",
+        "workflow": ".github/workflows/e2e.yml"
+      },
       "advisory_jobs": [
         "go-test",
         "scripts-test",
