@@ -42,7 +42,7 @@
 # Repos on a plan without rulesets (private repos in a Free org) are
 # reported as UNAVAILABLE — GitHub cannot enforce anything there.
 #
-# usage: enforce.sh [--apply] [--audit] [--report FILE] (--all | owner/repo ...)
+# usage: enforce.sh [--apply] [--audit] [--flow] [--report FILE] (--all | owner/repo ...)
 #        enforce.sh --selftest
 #   dry-run unless --apply. --audit only reads: it answers the three questions
 #   that decide whether the gate is real on a repository — is the workflow
@@ -135,10 +135,11 @@ use_owner_token() {   # use_owner_token <owner[/repo]>: export GH_TOKEN for that
 # skipped part of the fleet must not read as a clean pass.
 FLEET_ERRORS=()
 
-APPLY=false; AUDIT=false; SELFTEST=false; REPORT=""; TARGETS=(); ALL=false; LISTED=()
+FLOW=false; APPLY=false; AUDIT=false; SELFTEST=false; REPORT=""; TARGETS=(); ALL=false; LISTED=()
 
 while [ $# -gt 0 ]; do
     case "$1" in
+        --flow) FLOW=true ;;
         --apply) APPLY=true ;;
         --audit) AUDIT=true ;;
         --selftest) SELFTEST=true ;;
@@ -178,7 +179,7 @@ while [ $# -gt 0 ]; do
     esac
     shift
 done
-$SELFTEST || [ "${#TARGETS[@]}" -gt 0 ] || [ "${#FLEET_ERRORS[@]}" -gt 0 ] || { echo "usage: enforce.sh [--apply] [--audit] [--report FILE] (--all | owner/repo ...)" >&2; exit 2; }
+$SELFTEST || [ "${#TARGETS[@]}" -gt 0 ] || [ "${#FLEET_ERRORS[@]}" -gt 0 ] || { echo "usage: enforce.sh [--apply] [--audit] [--flow] [--report FILE] (--all | owner/repo ...)" >&2; exit 2; }
 [ -r "$STUB_FILE" ] || { echo "stub not found: $STUB_FILE" >&2; exit 2; }
 STUB_B64="$(base64 -w0 < "$STUB_FILE")"
 STUB_BLOB="$(git hash-object "$STUB_FILE")"
@@ -928,6 +929,16 @@ if $AUDIT; then
         # gap invents work that does not exist.
         [ -n "$db" ] || { printf '%-40s %-8s %-10s %-12s %s\n' "$repo" - empty - -; continue; }
         total=$((total + 1))
+        if $FLOW; then
+            flow_registry="$SCRIPT_DIR/../flow/projects.json"
+            if python3 -c 'import json,sys; sys.exit(sys.argv[2] not in json.load(open(sys.argv[1]))["projects"])' "$flow_registry" "$repo"; then
+                if ! python3 "$SCRIPT_DIR/../flow/flow_rollout.py" --registry "$flow_registry" --audit -- "$repo"; then
+                    FLEET_ERRORS+=("$repo: flow audit failed")
+                fi
+            else
+                FLEET_ERRORS+=("$repo: flow profile missing")
+            fi
+        fi
         vis="$(gh api "repos/$repo" --jq 'if .private then "private" else "public" end' 2>/dev/null)"
         if gh api "repos/$repo/contents/$STUB_PATH?ref=$db" --jq .content >/dev/null 2>&1 \
            || [ "$repo" = "$SELF_REPO" ]; then wf=yes; else wf=NO; fi
@@ -1003,6 +1014,20 @@ for repo in "${TARGETS[@]}"; do
         case "$RT_STATE" in error:*) FLEET_ERRORS+=("$repo: runner-template stubs $RT_STATE") ;; esac
         RT_SEEN+=("${repo%%/*}")
     fi
+    if $FLOW; then
+        flow_registry="$SCRIPT_DIR/../flow/projects.json"
+        if python3 -c 'import json,sys; sys.exit(sys.argv[2] not in json.load(open(sys.argv[1]))["projects"])' "$flow_registry" "$repo"; then
+            flow_args=(--registry "$flow_registry")
+            $APPLY && flow_args+=(--apply)
+            $AUDIT && flow_args+=(--audit)
+            if ! python3 "$SCRIPT_DIR/../flow/flow_rollout.py" "${flow_args[@]}" -- "$repo"; then
+                FLEET_ERRORS+=("$repo: flow migration or protection failed")
+            fi
+        else
+            printf '%-40s flow=needs-profile\n' "$repo"
+        fi
+    fi
+
 done
 
 # With --all the targets are every repository an owner's listing returned, so

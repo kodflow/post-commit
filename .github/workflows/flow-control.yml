@@ -1,0 +1,86 @@
+name: flow-control
+'on':
+  schedule:
+  - cron: '*/5 * * * *'
+  workflow_dispatch:
+    inputs:
+      targets:
+        description: Space-separated owner/repo targets; empty means enrolled fleet
+        type: string
+        default: ''
+      apply:
+        description: Publish admission results and merge authorized PRs
+        type: boolean
+        default: false
+permissions:
+  contents: read
+concurrency:
+  group: flow-control
+  cancel-in-progress: false
+jobs:
+  control:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+    - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+    - name: token for kodflow
+      id: token-kodflow
+      uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1
+      with:
+        client-id: ${{ vars.CI_APP_CLIENT_ID }}
+        private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+        owner: kodflow
+        permission-contents: ${{ (github.event_name == 'schedule' || inputs.apply) && 'write' || 'read' }}
+        permission-pull-requests: ${{ (github.event_name == 'schedule' || inputs.apply) && 'write' || 'read' }}
+        permission-statuses: ${{ (github.event_name == 'schedule' || inputs.apply) && 'write' || 'read' }}
+        permission-actions: read
+    - name: token for kodmain
+      id: token-kodmain
+      uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1
+      with:
+        client-id: ${{ vars.CI_APP_CLIENT_ID }}
+        private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+        owner: kodmain
+        permission-contents: ${{ (github.event_name == 'schedule' || inputs.apply) && 'write' || 'read' }}
+        permission-pull-requests: ${{ (github.event_name == 'schedule' || inputs.apply) && 'write' || 'read' }}
+        permission-statuses: ${{ (github.event_name == 'schedule' || inputs.apply) && 'write' || 'read' }}
+        permission-actions: read
+    - name: token for kitsunium
+      id: token-kitsunium
+      uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1
+      with:
+        client-id: ${{ vars.CI_APP_CLIENT_ID }}
+        private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+        owner: kitsunium
+        permission-contents: ${{ (github.event_name == 'schedule' || inputs.apply) && 'write' || 'read' }}
+        permission-pull-requests: ${{ (github.event_name == 'schedule' || inputs.apply) && 'write' || 'read' }}
+        permission-statuses: ${{ (github.event_name == 'schedule' || inputs.apply) && 'write' || 'read' }}
+        permission-actions: read
+    - name: token for supervizio
+      id: token-supervizio
+      uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1
+      with:
+        client-id: ${{ vars.CI_APP_CLIENT_ID }}
+        private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+        owner: supervizio
+        permission-contents: ${{ (github.event_name == 'schedule' || inputs.apply) && 'write' || 'read' }}
+        permission-pull-requests: ${{ (github.event_name == 'schedule' || inputs.apply) && 'write' || 'read' }}
+        permission-statuses: ${{ (github.event_name == 'schedule' || inputs.apply) && 'write' || 'read' }}
+        permission-actions: read
+    - name: Reconcile admissions serially
+      env:
+        FLEET_TOKEN_KODFLOW: ${{ steps.token-kodflow.outputs.token }}
+        FLEET_TOKEN_KODMAIN: ${{ steps.token-kodmain.outputs.token }}
+        FLEET_TOKEN_KITSUNIUM: ${{ steps.token-kitsunium.outputs.token }}
+        FLEET_TOKEN_SUPERVIZIO: ${{ steps.token-supervizio.outputs.token }}
+        FLOW_APPLY: ${{ github.event_name == 'schedule' || inputs.apply }}
+        FLOW_TARGETS: ${{ inputs.targets }}
+      run: 'flow_args=()
+
+        [ "$FLOW_APPLY" = true ] && flow_args+=(--apply)
+
+        read -ra flow_targets <<< "$FLOW_TARGETS"
+
+        python3 flow/flow_fleet.py "${flow_args[@]}" -- "${flow_targets[@]}"
+
+        '
