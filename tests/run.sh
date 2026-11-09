@@ -1133,8 +1133,37 @@ if [ -n "${CI:-}" ]; then
     fi
 fi
 
+echo "== coderabbit: render, merge, schema, migration (tests/coderabbit_test.py) =="
+CRPY="${PC_YAML_PYTHON:-python3}"
+if "$CRPY" -c 'import yaml' 2>/dev/null; then
+    if out="$("$CRPY" -m unittest "$ROOT/tests/coderabbit_test.py" 2>&1)"; then
+        PASS=$((PASS+1)); printf '  ok   coderabbit_test.py: %s\n' "$(grep -E '^Ran [0-9]+ tests' <<< "$out")"
+    else
+        FAIL=$((FAIL+1)); printf '  FAIL coderabbit_test.py\n%s\n' "$(printf '%s' "$out" | sed 's/^/       /')"
+    fi
+    # The schema oracle holds the built-in validator to the jsonschema package:
+    # optional on a laptop, mandatory in CI, like the YAML oracle above.
+    if [ -n "${CI:-}" ]; then
+        if grep -q 'oracle: jsonschema agrees on' <<< "$out"; then
+            PASS=$((PASS+1)); echo "  ok   the schema oracle ran"
+        else
+            FAIL=$((FAIL+1)); echo "  FAIL the schema oracle did not run in CI (no python3-jsonschema?)"
+        fi
+    fi
+else
+    FAIL=$((FAIL+1)); echo "  FAIL no python with PyYAML (set PC_YAML_PYTHON): coderabbit.py cannot be tested"
+fi
+
 echo "== enforce: end to end, against a fake gh =="
 FAKEBIN="$(mktemp -d)"; ln -s "$ROOT/tests/fake-gh.sh" "$FAKEBIN/gh"
+# Every repository of kodflow, kitsunium and supervizio is also given its
+# .coderabbit.yaml. The fixtures below that are not about it carry it already,
+# rendered from the defaults, so that what they assert (no write, no pull
+# request) still holds; the CodeRabbit cases further down start from scratch.
+CRR="$(mktemp -d)"
+for o in kodflow kitsunium supervizio; do
+    "$CRPY" "$ROOT/scripts/coderabbit.py" render --root "$ROOT/stub/coderabbit" --owner "$o" > "$CRR/$o.yaml" 2>/dev/null
+done
 STUB="$ROOT/stub/post-commit.yml"
 # What an overridden repository must carry, derived here WITHOUT render_stub —
 # every job's runs-on is the stub's hosted runner, and every one moves — so
@@ -1152,6 +1181,7 @@ efx() {   # efx <owner/repo> <visibility|-> <deployed-file|-> [flag-file...] -> 
     local d repo="$1" f; d="$(mktemp -d)"; mkdir -p "$d/$repo"
     [ "$2" = - ] || printf '%s' "$2" > "$d/$repo/visibility"
     [ "$3" = - ] || cp "$3" "$d/$repo/workflow.yml"
+    if [ -s "$CRR/${repo%%/*}.yaml" ]; then mkdir -p "$d/$repo/cr"; cp "$CRR/${repo%%/*}.yaml" "$d/$repo/cr/.coderabbit.yaml"; fi
     shift 3; for f in "$@"; do : > "$d/$repo/$f"; done
     printf '%s' "$d"
 }
@@ -1304,7 +1334,7 @@ grep -q 'stub=present ' <<< "$EOUT"; eok "current, the lookup failing: still pre
 # its own owner's token, and --all must list through the installations, since
 # /user answers no installation token.
 fx="$(efx kodflow/a private "$STUB")"; mkdir -p "$fx/supervizio/b"
-printf private > "$fx/supervizio/b/visibility"; cp "$STUB" "$fx/supervizio/b/workflow.yml"
+printf private > "$fx/supervizio/b/visibility"; cp "$STUB" "$fx/supervizio/b/workflow.yml"; mkdir -p "$fx/supervizio/b/cr"; cp "$CRR/supervizio.yaml" "$fx/supervizio/b/cr/.coderabbit.yaml"
 printf '%s' '{"repositories":[{"full_name":"kodflow/a","archived":false,"fork":false},{"full_name":"kodflow/old","archived":true,"fork":false}]}' > "$fx/installation.tk-kodflow"
 printf '%s' '{"repositories":[{"full_name":"supervizio/b","archived":false,"fork":false},{"full_name":"supervizio/f","archived":false,"fork":true}]}' > "$fx/installation.tk-supervizio"
 EOUT="$(FLEET_OWNERS="kodflow supervizio" FLEET_TOKEN_KODFLOW=tk-kodflow FLEET_TOKEN_SUPERVIZIO=tk-supervizio erun "$fx" --all)"; rc=$?
@@ -1333,7 +1363,7 @@ eok "...and the run exits 1" $(( rc == 1 ? 0 : 1 ))
 
 # The audit walks the same targets and must route the same way.
 fx="$(efx kodflow/a private "$STUB")"; mkdir -p "$fx/supervizio/b"
-printf private > "$fx/supervizio/b/visibility"; cp "$STUB" "$fx/supervizio/b/workflow.yml"
+printf private > "$fx/supervizio/b/visibility"; cp "$STUB" "$fx/supervizio/b/workflow.yml"; mkdir -p "$fx/supervizio/b/cr"; cp "$CRR/supervizio.yaml" "$fx/supervizio/b/cr/.coderabbit.yaml"
 printf '%s' '{"repositories":[{"full_name":"kodflow/a","archived":false,"fork":false}]}' > "$fx/installation.tk-kodflow"
 printf '%s' '{"repositories":[{"full_name":"supervizio/b","archived":false,"fork":false}]}' > "$fx/installation.tk-supervizio"
 EOUT="$(FLEET_OWNERS="kodflow supervizio" FLEET_TOKEN_KODFLOW=tk-kodflow FLEET_TOKEN_SUPERVIZIO=tk-supervizio erun "$fx" --audit --all)"; rc=$?
@@ -1450,6 +1480,126 @@ EOUT="$(FLEET_OWNERS="kodmain" FLEET_TOKEN_KODMAIN=tk-kodmain erun "$fx" --all)"
 grep -q '^kodmain/runner-template .*runner-template-stubs=skip:empty' <<< "$EOUT"; eok "--all: an empty runner-template is skip:empty" $?
 ! grep -q 'runner-template-stubs=missing' <<< "$EOUT"; eok "...not reported as missing" $?
 ! grep -qE '^(kitsunium|supervizio)/runner-template' <<< "$EOUT"; eok "...owners this run did not list are not reported" $?
+
+echo "== enforce: .coderabbit.yaml, against a fake gh =="
+# The real script and the real coderabbit.py against a fake API: which files a
+# sync writes, in which order, on which branch, and what it refuses to touch.
+CRFIX="$ROOT/tests/fixtures/coderabbit"
+CRW="$(mktemp -d)"
+crfx() {   # crfx <owner/repo> [name=file ...] -> a fixture: the gate in place, only those CodeRabbit files on main
+    local d repo="$1" kv; d="$(efx "$1" private "$STUB")"; shift
+    rm -rf "${d:?}/$repo/cr"; mkdir -p "$d/$repo/cr"
+    for kv in "$@"; do cp "${kv#*=}" "$d/$repo/cr/${kv%%=*}"; done
+    printf '%s' "$d"
+}
+crwant() {   # crwant <owner> [local-file]: what coderabbit.py renders, for comparison
+    "$CRPY" "$ROOT/scripts/coderabbit.py" render --root "$ROOT/stub/coderabbit" --owner "$1" ${2:+--local "$2"}
+}
+crwrites() {   # crwrites <fixture>: was anything written, deleted or opened for CodeRabbit?
+    # The gate's own sync is not ours to judge here: these fixtures deploy the
+    # hosted stub on private repositories, which enforce rightly syncs.
+    grep -qE -- 'contents/\.coderabbit[^ ]* -X (PUT|DELETE)|ref=refs/heads/chore/coderabbit|^pr create .*--head chore/coderabbit' "$1/calls.log"
+}
+
+fx="$(crfx kodflow/fresh)"; EOUT="$(erun "$fx" kodflow/fresh)"; rc=$?
+grep -q 'coderabbit=create:would-sync(.coderabbit.yaml)' <<< "$EOUT"; eok "no CodeRabbit file, dry-run: would create .coderabbit.yaml" $?
+! crwrites "$fx"; eok "...and a dry-run writes nothing" $?
+eok "...and exits 0" "$rc"
+fx="$(crfx kodflow/fresh)"; EOUT="$(erun "$fx" --apply kodflow/fresh)"
+grep -q 'coderabbit=create:pr-created(.coderabbit.yaml) https://' <<< "$EOUT"; eok "--apply: one pull request" $?
+crwant kodflow > "$CRW/want.yaml"
+cmp -s "$fx/kodflow/fresh/cr-put/.coderabbit.yaml" "$CRW/want.yaml"; eok "...writing the rendering of the defaults byte for byte" $?
+grep -qx 'inheritance: true' "$fx/kodflow/fresh/cr-put/.coderabbit.yaml"; eok "...with inheritance on, so the dashboard's settings still apply" $?
+if [ ! -e "$fx/kodflow/fresh/cr-put/.coderabbit.local.yaml" ]; then rc=0; else rc=1; fi; eok "...and no local file invented for it" "$rc"
+grep -qF -- 'pr create --repo kodflow/fresh --base main --head chore/coderabbit --title ci(coderabbit): sync .coderabbit.yaml with the central template' "$fx/calls.log"
+eok "...on chore/coderabbit, under its conventional title" $?
+grep -q 'There was no file before' "$fx/kodflow/fresh/cr-pr.body"; eok "...with a body that says what the file sets" $?
+grep -qF -- '-f message=ci(coderabbit): render .coderabbit.yaml from the central template' "$fx/calls.log"; eok "...and a conventional commit message" $?
+
+# kitsunium/sdk, its real file: migrated, the local part first, nothing CodeRabbit
+# reads changes, and kitsunium's own managed key is in the rendering.
+fx="$(crfx kitsunium/sdk .coderabbit.yaml="$CRFIX/kitsunium-sdk.yaml")"; EOUT="$(erun "$fx" --apply kitsunium/sdk)"
+grep -q 'coderabbit=migrate:pr-created(.coderabbit.local.yaml .coderabbit.yaml)' <<< "$EOUT"; eok "kitsunium/sdk, hand-written, --apply: migrated in one pull request" $?
+if [ "$(tr '\n' ' ' < "$fx/kitsunium/sdk/cr-put.order")" = ".coderabbit.local.yaml .coderabbit.yaml " ]; then rc=0; else rc=1; fi; eok "...the local part committed before the file rendered from it" "$rc"
+cp "$fx/kitsunium/sdk/cr-put/.coderabbit.local.yaml" "$CRW/sdk.local"; cp "$fx/kitsunium/sdk/cr-put/.coderabbit.yaml" "$CRW/sdk.yaml"
+crwant kitsunium "$CRW/sdk.local" > "$CRW/want.yaml"
+cmp -s "$CRW/sdk.yaml" "$CRW/want.yaml"; eok "...the rendering is that of the local part" $?
+grep -q 'allow_author_approval: false' "$CRW/sdk.yaml"; eok "...and carries kitsunium's managed key" $?
+! grep -q 'kodflow-ci' "$CRW/sdk.local"; eok "...the hand-written exclusion left the local part" $?
+grep -qF -- '- nothing: the configuration CodeRabbit reads is the same' "$fx/kitsunium/sdk/cr-pr.body"; eok "...and the body shows the semantic diff: nothing" $?
+if [ ! -s "$fx/kitsunium/sdk/cr-put/.coderabbit.yaml.sha" ]; then rc=0; else rc=1; fi; eok "...files new on the branch are created, not updated" "$rc"
+
+# Once that is merged, the next run has nothing to do.
+fx="$(crfx kitsunium/sdk .coderabbit.local.yaml="$CRW/sdk.local" .coderabbit.yaml="$CRW/sdk.yaml")"; EOUT="$(erun "$fx" --apply kitsunium/sdk)"
+grep -q 'coderabbit=present ' <<< "$EOUT"; eok "merged: present" $?
+! crwrites "$fx"; eok "...nothing written, no pull request" $?
+printf 'https://github.com/kitsunium/sdk/pull/77' > "$fx/kitsunium/sdk/open_pr.cr"
+EOUT="$(erun "$fx" kitsunium/sdk)"
+grep -q 'coderabbit=present:would-close' <<< "$EOUT"; eok "present, a sync still open, dry-run: would close it" $?
+EOUT="$(erun "$fx" --apply kitsunium/sdk)"
+grep -q 'coderabbit=present:closed-obsolete' <<< "$EOUT" && [ "$(cat "$fx/kitsunium/sdk/pr.closed")" = https://github.com/kitsunium/sdk/pull/77 ]
+eok "...--apply closes it" $?
+
+# The local part edited: the rendering follows, and only the rendering moves.
+sed 's/^  profile: chill$/  profile: assertive/' "$CRW/sdk.local" > "$CRW/sdk.local2"
+fx="$(crfx kitsunium/sdk .coderabbit.local.yaml="$CRW/sdk.local2" .coderabbit.yaml="$CRW/sdk.yaml")"; EOUT="$(erun "$fx" --apply kitsunium/sdk)"
+grep -q 'coderabbit=sync:pr-created(.coderabbit.yaml)' <<< "$EOUT"; eok "the local part edited: a sync of .coderabbit.yaml alone" $?
+grep -qx '  profile: assertive' "$fx/kitsunium/sdk/cr-put/.coderabbit.yaml" && [ ! -e "$fx/kitsunium/sdk/cr-put/.coderabbit.local.yaml" ]
+eok "...carrying the edit, the local part untouched" $?
+grep -qF '`reviews.profile`: changed from "chill" to "assertive"' "$fx/kitsunium/sdk/cr-pr.body"; eok "...and the body names the key that changed" $?
+
+# An open sync whose branch already has the local part: only the rendering is
+# written there, and no second pull request.
+fx="$(crfx kitsunium/sdk .coderabbit.yaml="$CRFIX/kitsunium-sdk.yaml")"
+printf 'https://github.com/kitsunium/sdk/pull/78' > "$fx/kitsunium/sdk/open_pr.cr"
+mkdir -p "$fx/kitsunium/sdk/cr-branch"; cp "$CRW/sdk.local" "$fx/kitsunium/sdk/cr-branch/.coderabbit.local.yaml"
+cp "$CRFIX/kitsunium-sdk.yaml" "$fx/kitsunium/sdk/cr-branch/.coderabbit.yaml"
+EOUT="$(erun "$fx" --apply kitsunium/sdk)"
+grep -q 'coderabbit=migrate:pr-updated(1) https://github.com/kitsunium/sdk/pull/78' <<< "$EOUT"; eok "a sync open, half done: brought up to date" $?
+if [ "$(tr '\n' ' ' < "$fx/kitsunium/sdk/cr-put.order")" = ".coderabbit.yaml " ]; then rc=0; else rc=1; fi; eok "...writing only what its branch lacks" "$rc"
+if [ "$(cat "$fx/kitsunium/sdk/cr-put/.coderabbit.yaml.sha")" = "$(git hash-object "$CRFIX/kitsunium-sdk.yaml")" ]; then rc=0; else rc=1; fi; eok "...updating the branch's file by its blob sha" "$rc"
+! grep -q '^pr create .*--head chore/coderabbit' "$fx/calls.log"; eok "...and no second pull request" $?
+
+# A .coderabbit.yml: migrated to .coderabbit.yaml, and removed last.
+fx="$(crfx kodflow/terraform-provider-n8n .coderabbit.yml="$CRFIX/kodflow-terraform-provider-n8n.yml")"
+mkdir -p "$fx/kodflow/terraform-provider-n8n/cr-branch"; cp "$CRFIX/kodflow-terraform-provider-n8n.yml" "$fx/kodflow/terraform-provider-n8n/cr-branch/.coderabbit.yml"
+EOUT="$(erun "$fx" --apply kodflow/terraform-provider-n8n)"
+grep -q 'coderabbit=migrate:pr-created(.coderabbit.local.yaml .coderabbit.yaml -.coderabbit.yml)' <<< "$EOUT"; eok ".coderabbit.yml: migrated, and removed" $?
+if [ "$(tr '\n' ' ' < "$fx/kodflow/terraform-provider-n8n/cr-put.order")" = ".coderabbit.local.yaml .coderabbit.yaml -.coderabbit.yml " ]; then rc=0; else rc=1; fi; eok "...the removal last" "$rc"
+if [ "$(cat "$fx/kodflow/terraform-provider-n8n/cr-del/.coderabbit.yml")" = "$(git hash-object "$CRFIX/kodflow-terraform-provider-n8n.yml")" ]; then rc=0; else rc=1; fi; eok "...by its blob sha on the branch" "$rc"
+grep -qF 'added "kodflow-ci[bot]"' "$fx/kodflow/terraform-provider-n8n/cr-pr.body"; eok "...and the body shows what it gains: the exclusion" $?
+
+# What a person must fix is refused, said, and left alone; the run is not red.
+printf 'reviews:\n  profile: loud\n' > "$CRW/bad.local"
+fx="$(crfx supervizio/agent .coderabbit.local.yaml="$CRW/bad.local")"; EOUT="$(erun "$fx" --apply supervizio/agent)"; rc=$?
+grep -q 'coderabbit=refused .*fails the schema' <<< "$EOUT"; eok "a local part the schema refuses: refused, and why" $?
+grep -q '^::warning::supervizio/agent: .coderabbit.yaml not synced' <<< "$EOUT"; eok "...with a warning annotation" $?
+! crwrites "$fx"; eok "...nothing written, no pull request" $?
+eok "...and the run exits 0: no run of this script can fix it" "$rc"
+printf 'language: fr\n' > "$CRW/other.yml"
+fx="$(crfx supervizio/agent .coderabbit.yaml="$CRFIX/kodflow-view.yaml" .coderabbit.yml="$CRW/other.yml")"; EOUT="$(erun "$fx" --apply supervizio/agent)"
+grep -q 'coderabbit=refused .*both .coderabbit.yaml and .coderabbit.yml' <<< "$EOUT"; eok "two hand-written files: refused, not guessed" $?
+! crwrites "$fx"; eok "...nothing written" $?
+
+# A failed read is not an absent file, a failed lookup is not "none open".
+fx="$(crfx kodflow/fresh)"; mkdir -p "$fx/kodflow/fresh/cr-fail"; : > "$fx/kodflow/fresh/cr-fail/.coderabbit.local.yaml"
+EOUT="$(erun "$fx" --apply kodflow/fresh)"; rc=$?
+grep -q 'coderabbit=error:read:.coderabbit.local.yaml' <<< "$EOUT"; eok "a CodeRabbit file read failing with a 502: an error, not absence" $?
+! crwrites "$fx"; eok "...nothing written" $?
+eok "...and the run exits 1" $(( rc == 1 ? 0 : 1 ))
+fx="$(crfx kodflow/fresh)"; : > "$fx/kodflow/fresh/pr_list_fails"
+EOUT="$(erun "$fx" --apply kodflow/fresh)"; rc=$?
+grep -q 'coderabbit=error:pr-lookup' <<< "$EOUT"; eok "the pull request lookup failing: an error, not 'none open'" $?
+! crwrites "$fx"; eok "...nothing written, no second pull request" $?
+fx="$(crfx kodflow/fresh)"; EOUT="$(PC_YAML_PYTHON=false erun "$fx" --apply kodflow/fresh)"; rc=$?
+grep -q 'coderabbit=error:no-python-yaml' <<< "$EOUT" && [ "$rc" -eq 1 ]; eok "no python with PyYAML: an error, never a file written on a guess" $?
+
+# Owners outside the decision, and the report.
+fx="$(efx kodmain/shaker-api private "$STUB")"; EOUT="$(erun "$fx" --apply kodmain/shaker-api)"
+! grep -q 'coderabbit=' <<< "$EOUT" && ! grep -q 'coderabbit' "$fx/calls.log"; eok "kodmain: no CodeRabbit row, no CodeRabbit call" $?
+fx="$(crfx kodflow/fresh)"; EOUT="$(erun "$fx" --report "$fx/report.md" kodflow/fresh)"
+grep -q '^### .coderabbit.yaml$' "$fx/report.md" && grep -qF '| kodflow/fresh | create:would-sync(.coderabbit.yaml) |' "$fx/report.md"
+eok "the report carries a .coderabbit.yaml table" $?
 
 echo "== block-merge pin =="
 # The gate at @main, the token-bearing action at a full SHA — and the script

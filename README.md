@@ -531,6 +531,90 @@ and merge that here. The next enforce run opens the sync on every owner.
   a passing `post-commit` status is rejected by the ruleset — but the commit
   was made, locally, by someone who then has to fix it.
 
+## CodeRabbit
+
+The same enforce run keeps one more file in place on every repository of
+**kodflow, kitsunium and supervizio**: `.coderabbit.yaml`. CodeRabbit's
+Organization Settings and global overrides only take effect on kodflow; on the
+other two owners the file is the only lever, so the file is what this
+repository imposes. kodmain is not covered.
+
+CodeRabbit reads one file (`.coderabbit.yaml`, or the older `.coderabbit.yml`),
+and YAML cannot hold two `reviews:` keys, so the two owners of that file get
+two files:
+
+| File | Owner | Read by CodeRabbit |
+|---|---|---|
+| `.coderabbit.local.yaml` | the repository: anything the schema allows | no |
+| `.coderabbit.yaml` | enforce: **generated**, never edited by hand | yes |
+
+```
+managed  = stub/coderabbit/central.yaml, then stub/coderabbit/owners/<owner>.yaml
+local    = .coderabbit.local.yaml, or stub/coderabbit/defaults.yaml when there is none
+rendered = local with managed laid on top
+```
+
+- **Managed keys win.** A scalar in the managed part replaces the local value.
+  A list in it is always present in full and first; the local file can only
+  add items after it. Mappings merge key by key, the local file's order kept.
+- **Today's managed keys**: `reviews.auto_review.ignore_usernames`
+  (`kodflow-ci[bot]`) and `reviews.auto_review.ignore_title_keywords` (the
+  titles of the sync pull requests), so the pull requests this repository opens
+  everywhere do not spend the CodeRabbit quota; on kitsunium,
+  `reviews.auto_approvals.allow_author_approval: false` too.
+- **No local file** means the defaults: `inheritance: true`, so a repository
+  that was configured by the dashboard keeps those settings — CodeRabbit merges
+  the file with them, lists included — and gains the managed keys.
+- **The header** names the central files by blob sha, not by this repository's
+  commit: a commit here that does not touch `stub/coderabbit/` changes no
+  rendering and opens no pull request.
+
+`scripts/coderabbit.py` does the YAML; `enforce.sh` only reads and writes
+files, as for the runner-template stubs: one pull request on
+`chore/coderabbit`, brought up to date while it is open, closed once the
+default branch is current. What the default branch carries decides the kind:
+
+| Default branch | Kind | The pull request writes |
+|---|---|---|
+| no CodeRabbit file | `create` | `.coderabbit.yaml` from the defaults |
+| a hand-written `.coderabbit.yaml` or `.coderabbit.yml` | `migrate` | `.coderabbit.local.yaml` (the same text, comments kept, the hand-written exclusion dropped), then `.coderabbit.yaml`; a `.coderabbit.yml` is deleted last |
+| `.coderabbit.local.yaml` and a stale rendering | `sync` | `.coderabbit.yaml` |
+| the rendering, current | `present` | nothing |
+
+The body of every pull request carries a **semantic diff**: the configuration
+CodeRabbit reads, key by key, before and after. A migration that would change
+anything but the managed keys is refused, so the first sync of a hand-written
+file can only add the exclusion.
+
+**Refused, not forced** — reported with a `::warning::`, nothing written, the run
+not failed, since no run of this script can fix what a person wrote: a local
+file that does not parse or has a duplicate key, a rendering the pinned schema
+(`stub/coderabbit/schema.v2.json`) refuses, a hand-written `.coderabbit.yaml`
+**and** `.coderabbit.yml` (which one CodeRabbit reads is not documented). A read
+or a lookup that fails is an error, and the run exits 1.
+
+**YAML 1.2.** Files are read with the 1.2 core schema, as CodeRabbit reads
+them — `mode: off` is the string `off`, not a boolean — and written so that a
+1.1 and a 1.2 reader both read them back unchanged, or not written at all.
+
+**No package in the enforce job.** It holds a write token on every repository
+of every owner, so `coderabbit.py` needs only python3 and PyYAML, both on the
+runner image, and checks the JSON Schema keywords the pinned schema uses
+itself, refusing a schema that uses any other. CI holds that checker to the
+`jsonschema` package on every document `tests/coderabbit_test.py` builds, valid
+and invalid, in a job that holds no token.
+
+To change what every repository gets, edit `stub/coderabbit/` and merge; to
+move the schema, replace `schema.v2.json` with a newer copy of
+`https://coderabbit.ai/integrations/schema.v2.json` and let CI say whether the
+fleet's files still pass. To try a change locally:
+
+```sh
+python3 scripts/coderabbit.py render --root stub/coderabbit --owner kitsunium --local path/to/.coderabbit.local.yaml
+python3 scripts/coderabbit.py validate --root stub/coderabbit path/to/.coderabbit.yaml
+python3 scripts/coderabbit.py diff before.yaml after.yaml
+```
+
 ## Rewriting history
 
 `scripts/rewrite-history.sh owner/repo` is a **dry run**: it mirrors the
@@ -632,14 +716,18 @@ scripts/patterns.sh           reference reader of both: scopes (commit, pr), lis
 scripts/agent-paths.txt       agent RUNTIME paths (logs, transcripts, caches); config kept
 scripts/foreign-history.txt   repositories judged in foreign-history mode (forks of upstreams)
 scripts/denied-identities.txt SHA-256 of the identities no commit may carry there
-scripts/enforce.sh            fleet: stub PR + ruleset + runner-template stubs, idempotent
+scripts/enforce.sh            fleet: stub PR + ruleset + runner-template stubs + .coderabbit.yaml, idempotent
+scripts/coderabbit.py         render, check and migrate .coderabbit.yaml (python3 + PyYAML only)
 scripts/bump-runner-template.sh  move every runner-template stub to one kodflow/runner-template commit
 scripts/rewrite-history.sh    history scrub (messages + identities), dry-run by default
 stub/post-commit.yml          the file installed in each repo
 stub/pr-body.md               the PR body enforce.sh uses
 stub/runner-template/<owner>/ the stubs installed in each <owner>/runner-template
 stub/runner-template-pr-body.md  the PR body of their sync
+stub/coderabbit/              the central CodeRabbit part, per-owner overlays, defaults, pinned schema
 tests/run.sh                  behaviour tests against real throwaway repos
+tests/coderabbit_test.py      coderabbit.py: YAML, merge, schema (+ jsonschema oracle), migration
+tests/fixtures/coderabbit/    real hand-written files of public repositories, and a ktn-linter excerpt
 .github/workflows/ci.yml      shellcheck + tests + YAML + dogfood (uses: ./)
 .github/workflows/enforce.yml fleet enforcement from GitHub (kodflow-ci app tokens)
 ```

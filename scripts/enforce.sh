@@ -36,7 +36,17 @@
 #             that has stubs but no runner-template repository is reported
 #             (a warning): this script never creates a repository.
 #
-# All three are idempotent; re-running never duplicates a PR or a ruleset.
+#   4. coderabbit — on every repository of kodflow, kitsunium and supervizio,
+#             ensure .coderabbit.yaml is the rendering of the central part
+#             (stub/coderabbit/) laid over the repository's own
+#             .coderabbit.local.yaml (or the defaults when it has none); if
+#             not, ensure one PR (branch chore/coderabbit) carrying it is open.
+#             The first sync of a hand-written file moves it, comments and all,
+#             to .coderabbit.local.yaml. scripts/coderabbit.py renders, checks
+#             against the pinned schema and writes the PR body's semantic diff;
+#             what a person must fix is `refused` with a warning, never forced.
+#
+# All four are idempotent; re-running never duplicates a PR or a ruleset.
 # Re-run after the stub PR merges to put the ruleset on: until then the repo
 # is reported as `deferred:stub-not-merged`.
 # Repos on a plan without rulesets (private repos in a Free org) are
@@ -63,6 +73,15 @@ RULESET_NAME="post-commit"
 RT_STUB_ROOT="$SCRIPT_DIR/../stub/runner-template"
 RT_REPO="runner-template"
 RT_BRANCH="chore/runner-template"
+# The CodeRabbit configuration: a central part imposed on every repository of
+# these owners, rendered with each repository's own .coderabbit.local.yaml into
+# the one file CodeRabbit reads. scripts/coderabbit.py does the YAML; this
+# script only moves files. kodmain is left out: no CodeRabbit decision covers it.
+CR_ROOT="$SCRIPT_DIR/../stub/coderabbit"
+CR_PY="$SCRIPT_DIR/coderabbit.py"
+CR_BRANCH="chore/coderabbit"
+CR_OWNERS=(kodflow kitsunium supervizio)
+CR_TITLE="ci(coderabbit): sync .coderabbit.yaml with the central template"
 # This repository gates itself through ci.yml, so it has no stub by design.
 SELF_REPO="kodflow/post-commit"
 GITHUB_ACTIONS_APP_ID=15368
@@ -621,6 +640,112 @@ ensure_rt_stubs() {   # ensure_rt_stubs <owner/repo> <default-branch> -> RT_STAT
     [ -n "$RT_PR" ] && RT_STATE="sync-created(${drift[*]})" || RT_STATE="error:pr"
 }
 
+# --- CodeRabbit ---------------------------------------------------------------
+# One file of the repository on one ref, saved to <outfile>, its blob sha to
+# <outfile>.sha. As for rt_blob, only a confirmed 404 means absent.
+cr_get() {   # cr_get <owner/repo> <path> <ref> <outfile> -> rc 0 found, 1 absent (404), 2 lookup failed
+    local json
+    if json="$(gh api "repos/$1/contents/$2?ref=$3" 2>"$WORKDIR/cr-get.err")"; then
+        printf '%s' "$json" | jq -r .sha > "$4.sha" 2>/dev/null || return 2
+        printf '%s' "$json" | jq -r .content | base64 -d > "$4" 2>/dev/null || return 2
+        return 0
+    fi
+    grep -q 'HTTP 404' "$WORKDIR/cr-get.err" && return 1
+    return 2
+}
+
+# .coderabbit.yaml of one repository. The default branch's .coderabbit.local.yaml,
+# .coderabbit.yaml and .coderabbit.yml go to coderabbit.py, which says what the
+# repository should carry (kind: present, create, migrate, sync) and the exact
+# files to write or delete. Everything that differs goes into one pull request
+# on chore/coderabbit, opened, brought up to date, or closed once obsolete,
+# exactly as for the runner-template stubs. A repository whose own content
+# cannot be rendered (`refused`) is reported with a warning and left alone:
+# no run of this script can fix what a person wrote.
+ensure_coderabbit() {   # ensure_coderabbit <owner/repo> <default-branch> -> CR_STATE, CR_PR
+    local repo="$1" db="$2" owner="${1%%/*}" d f rc kind names=() del=() sha out n=0 args py
+    CR_STATE=""; CR_PR=""; CR_NOTE=""
+    case " ${CR_OWNERS[*]} " in *" $owner "*) ;; *) return 0 ;; esac
+    py="${PC_YAML_PYTHON:-python3}"
+    "$py" -c 'import yaml' 2>/dev/null || { CR_STATE="error:no-python-yaml"; return; }
+    d="$WORKDIR/cr"; rm -rf "$d"; mkdir -p "$d/db" "$d/branch" "$d/plan"
+    for f in .coderabbit.local.yaml .coderabbit.yaml .coderabbit.yml; do
+        cr_get "$repo" "$f" "$db" "$d/db/$f"; rc=$?
+        [ "$rc" -eq 2 ] && { CR_STATE="error:read:$f"; return; }
+        [ "$rc" -eq 1 ] && rm -f "$d/db/$f" "$d/db/$f.sha"
+    done
+    rm -f "$d/db/"*.sha
+    "$py" "$CR_PY" plan --root "$CR_ROOT" --owner "$owner" --current "$d/db" --out "$d/plan" 2> "$d/plan.err"; rc=$?
+    if [ "$rc" -eq 3 ]; then
+        CR_STATE="refused"; CR_NOTE="$(sed 's/^refused: //' "$d/plan.err" | head -1)"
+        echo "::warning::$repo: .coderabbit.yaml not synced: $CR_NOTE" >&2
+        return
+    fi
+    [ "$rc" -eq 0 ] || { CR_STATE="error:plan:$(head -c 80 "$d/plan.err" | tr '\n' ' ')"; return; }
+    kind="$(cat "$d/plan/kind")"; CR_NOTE="$(cat "$d/plan/note")"
+    # The order of the commits on the branch: the local part before the file
+    # rendered from it, the old .coderabbit.yml last.
+    for f in .coderabbit.local.yaml .coderabbit.yaml; do [ -f "$d/plan/write/$f" ] && names+=("$f"); done
+    while IFS= read -r f; do [ -n "$f" ] && del+=("$f"); done < "$d/plan/delete"
+
+    CR_PR="$(gh pr list --repo "$repo" --head "$CR_BRANCH" --state open --json url,isCrossRepository \
+               --jq '[.[] | select(.isCrossRepository | not)][0].url // empty' 2>/dev/null)" \
+        || { CR_STATE="error:pr-lookup"; CR_PR=""; return; }
+
+    if [ "$kind" = present ]; then
+        if [ -z "$CR_PR" ]; then CR_STATE="present"; return; fi
+        if ! $APPLY; then CR_STATE="present:would-close"; return; fi
+        gh pr close "$CR_PR" --repo "$repo" --delete-branch \
+            --comment "Closed by kodflow/post-commit's enforce: the default branch already carries the rendered .coderabbit.yaml, so this branch could only bring an obsolete version back." \
+            >/dev/null 2>&1 || { CR_STATE="error:close"; return; }
+        CR_STATE="present:closed-obsolete"; return
+    fi
+    local what="${names[*]-}"
+    [ "${#del[@]}" -gt 0 ] && what="${what:+$what }-${del[*]}"
+    if ! $APPLY; then
+        CR_STATE="$kind:would-sync($what)"; [ -n "$CR_PR" ] && CR_STATE="$kind:pr-would-update($what)"
+        return
+    fi
+
+    if [ -z "$CR_PR" ]; then
+        sha="$(gh api "repos/$repo/git/ref/heads/$db" --jq .object.sha 2>/dev/null)" || { CR_STATE="error:no-sha"; return; }
+        gh api "repos/$repo/git/refs" -X POST -f ref="refs/heads/$CR_BRANCH" -f sha="$sha" >/dev/null 2>&1 \
+            || gh api "repos/$repo/git/refs/heads/$CR_BRANCH" >/dev/null 2>&1 \
+            || { CR_STATE="error:branch"; return; }
+    fi
+    # Only what the branch does not already carry is written, so a re-run is a
+    # no-op and an open pull request is updated rather than duplicated.
+    local msg
+    for f in ${names[@]+"${names[@]}"}; do
+        cr_get "$repo" "$f" "$CR_BRANCH" "$d/branch/$f"; rc=$?
+        [ "$rc" -eq 2 ] && { CR_STATE="error:read:$f@$CR_BRANCH"; return; }
+        [ "$rc" -eq 0 ] && cmp -s "$d/branch/$f" "$d/plan/write/$f" && continue
+        args=(); [ "$rc" -eq 0 ] && args=(-f "sha=$(cat "$d/branch/$f.sha")")
+        case "$f" in
+            .coderabbit.local.yaml) msg="ci(coderabbit): keep this repository's own settings in .coderabbit.local.yaml" ;;
+            *) msg="ci(coderabbit): render .coderabbit.yaml from the central template" ;;
+        esac
+        out="$(gh api "repos/$repo/contents/$f" -X PUT -f message="$msg" \
+                -f content="$(base64 -w0 < "$d/plan/write/$f")" -f branch="$CR_BRANCH" "${args[@]}" 2>&1)" \
+            || { CR_STATE="error:put:$f:${out:0:60}"; return; }
+        n=$((n + 1))
+    done
+    for f in ${del[@]+"${del[@]}"}; do
+        cr_get "$repo" "$f" "$CR_BRANCH" "$d/branch/$f"; rc=$?
+        [ "$rc" -eq 2 ] && { CR_STATE="error:read:$f@$CR_BRANCH"; return; }
+        [ "$rc" -eq 1 ] && continue
+        out="$(gh api "repos/$repo/contents/$f" -X DELETE \
+                -f message="ci(coderabbit): drop $f, superseded by the rendered .coderabbit.yaml" \
+                -f sha="$(cat "$d/branch/$f.sha")" -f branch="$CR_BRANCH" 2>&1)" \
+            || { CR_STATE="error:delete:$f:${out:0:60}"; return; }
+        n=$((n + 1))
+    done
+    if [ -n "$CR_PR" ]; then CR_STATE="$kind:pr-updated($n)"; return; fi
+    CR_PR="$(gh pr create --repo "$repo" --base "$db" --head "$CR_BRANCH" --title "$CR_TITLE" \
+        --body-file "$d/plan/body.md" 2>&1 | grep -oE 'https://[^ ]+' | head -1)"
+    [ -n "$CR_PR" ] && CR_STATE="$kind:pr-created($what)" || CR_STATE="error:pr"
+}
+
 # Every stub calls kodflow/runner-template at one full SHA, the same in its
 # `uses:` and its `ref:`, and the same in every stub of every owner: a fleet
 # split across two pins is two versions of the logic running at once. Nothing
@@ -964,7 +1089,7 @@ if $AUDIT; then
     exit $?
 fi
 
-ROWS=(); RT_ROWS=(); RT_SEEN=()
+ROWS=(); RT_ROWS=(); RT_SEEN=(); CR_ROWS=()
 for err in "${FLEET_ERRORS[@]}"; do
     ROWS+=("${err%%:*}/*"$'\t'"-"$'\t'"error:listing"$'\t'"-"$'\t'"")
 done
@@ -1003,6 +1128,12 @@ for repo in "${TARGETS[@]}"; do
         case "$RT_STATE" in error:*) FLEET_ERRORS+=("$repo: runner-template stubs $RT_STATE") ;; esac
         RT_SEEN+=("${repo%%/*}")
     fi
+    ensure_coderabbit "$repo" "$db"
+    if [ -n "$CR_STATE" ]; then
+        CR_ROWS+=("$repo"$'\t'"$CR_STATE"$'\t'"$CR_PR"$'\t'"$CR_NOTE")
+        printf '%-40s coderabbit=%s %s%s\n' "$repo" "$CR_STATE" "$CR_PR" "${CR_NOTE:+ [$CR_NOTE]}"
+        case "$CR_STATE" in error:*) FLEET_ERRORS+=("$repo: coderabbit $CR_STATE") ;; esac
+    fi
 done
 
 # With --all the targets are every repository an owner's listing returned, so
@@ -1040,6 +1171,17 @@ if [ -n "$REPORT" ]; then
             for row in "${RT_ROWS[@]}"; do
                 IFS=$'\t' read -r r s p <<< "$row"
                 printf '| %s | %s | %s |\n' "$r" "$s" "${p:+[link]($p)}"
+            done
+        fi
+        if [ "${#CR_ROWS[@]}" -gt 0 ]; then
+            echo ""
+            echo "### .coderabbit.yaml"
+            echo ""
+            echo "| Repository | State | PR | Note |"
+            echo "|---|---|---|---|"
+            for row in "${CR_ROWS[@]}"; do
+                IFS=$'\t' read -r r s p x <<< "$row"
+                printf '| %s | %s | %s | %s |\n' "$r" "$s" "${p:+[link]($p)}" "$x"
             done
         fi
     } >> "$REPORT"
