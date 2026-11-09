@@ -47,7 +47,7 @@ The dashboard has no API for it, so it is pasted by hand.
 The workflow that re-asks CodeRabbit for the reviews it refused for quota
 (`probe.py` of kodflow-hooks, in kodflow/claude-marketplace) runs elsewhere,
 next to personal tokens, which a public repository must not hold. It checks
-this directory out anonymously and passes it as `--policy-dir`: the probe
+this directory out read-only, keeping no credential, and passes it as `--policy-dir`: the probe
 reads `settings.yaml` here for a repository without its own `.coderabbit.yaml`,
 and `override-<owner>.yaml` when one exists (none does: an empty override is
 the intended state). Renaming or moving `settings.yaml` therefore breaks it.
