@@ -1,3 +1,6 @@
 # The gate refuses a tracked agent configuration; this repo is not exempt.
 .claude/
 __pycache__/
+# scripts/coderabbit_metrics.py writes its reports here: they name private
+# repositories and never belong in this public repository.
+build/
