@@ -1,0 +1,30 @@
+# The CENTRAL part of every .coderabbit.yaml on the fleet (kodflow, kitsunium,
+# supervizio). scripts/enforce.sh renders each repository's .coderabbit.yaml as
+# its own .coderabbit.local.yaml with this file laid on top, and opens a sync
+# pull request whenever the result differs from what the repository carries.
+#
+# Every key here is MANAGED: a repository cannot change it. A scalar here wins
+# over the local value. A list here is always present in full, first, and the
+# items the local file adds that are not already in it follow. Keep this file
+# to what must hold everywhere; anything a repository may decide for itself
+# belongs in that repository's .coderabbit.local.yaml.
+#
+# Why it exists: CodeRabbit's Organization Settings and global overrides only
+# take effect on the kodflow owner. kitsunium and supervizio can only be
+# reached through the file, so the file is what this repository imposes.
+reviews:
+  auto_review:
+    # The pull requests kodflow-ci opens (gate sync, runner-template stubs,
+    # this file's own sync) are mechanical copies of a reviewed change here.
+    # Reviewing them again on every repository spends the CodeRabbit quota on
+    # nothing. The username catches all of them; the titles (the 08/11/2026
+    # decision's four, and this file's own sync title added on 09/11/2026)
+    # catch those pull requests when someone reopens one under their own account.
+    ignore_usernames:
+      - "kodflow-ci[bot]"
+    ignore_title_keywords:
+      - "ci(post-commit): sync the gate workflow with the central stub"
+      - "ci(runner-template): sync the stubs with kodflow/post-commit"
+      - "ci: add the mandatory post-commit gate"
+      - "ci: run every job on the self-hosted kodflow-runner"
+      - "ci(coderabbit): sync .coderabbit.yaml with the central template"

@@ -24,6 +24,14 @@
 #   open_pr.rt      a URL: an open pull request on chore/runner-template
 #   rt-fail/<file>  present: reading that file on the default branch fails
 #                   with HTTP 502 (not a 404)
+#   cr/<file>       .coderabbit.yaml, .coderabbit.local.yaml or .coderabbit.yml
+#                   on the default branch; absent: 404
+#   cr-branch/<file>  the same file on the chore/coderabbit branch
+#   cr-fail/<file>  present: reading that file on the default branch fails
+#                   with HTTP 502 (not a 404)
+#   open_pr.cr      a URL: an open pull request on chore/coderabbit
+#   cr-branch-exists  present: creating a branch fails, as for one left behind
+#   cr-too-large    present: a CodeRabbit file comes back with encoding "none"
 #   pr_list_fails   present: listing pull requests fails
 #   empty           present: the repository has no default branch
 #
@@ -34,7 +42,10 @@
 # put.branch (the branch that PUT wrote to),
 # pr.body (the body of a pull request it was asked to create), rt-put/<file>
 # and rt-pr.body (the same for the runner-template stubs), pr.closed (the pull
-# request it was asked to close) and tokens.log
+# request it was asked to close), cr-put/<file> (the decoded content of a
+# contents PUT of a CodeRabbit file; cr-put/<file>.sha the blob sha it named),
+# cr-del/<file> (a contents DELETE, holding the sha it named), cr-pr.body,
+# and tokens.log
 # (every invocation again, prefixed with the GH_TOKEN it carried).
 set -uo pipefail
 D="${FAKE_GH_DIR:?FAKE_GH_DIR is not set}"
@@ -45,13 +56,13 @@ die() { printf 'fake-gh: %s\n' "$*" >&2; exit "${RC:-1}"; }
 unknown() { RC=97 die "unmocked call: gh $ARGS"; }
 ARGS="$*"
 
-jqf=""; method=GET; endpoint=""; content=""; branch=""; repo=""; body=""; head=""; pos2=""
+jqf=""; method=GET; endpoint=""; content=""; branch=""; sha=""; repo=""; body=""; head=""; pos2=""
 sub="${1:-}"; shift || true
 while [ $# -gt 0 ]; do
     case "$1" in
         --jq) jqf="$2"; shift ;;
         -X) method="$2"; shift ;;
-        -f|-F) case "$2" in content=*) content="${2#content=}" ;; branch=*) branch="${2#branch=}" ;; esac; shift ;;
+        -f|-F) case "$2" in content=*) content="${2#content=}" ;; branch=*) branch="${2#branch=}" ;; sha=*) sha="${2#sha=}" ;; esac; shift ;;
         --input) [ "$2" = - ] && cat > /dev/null; shift ;;
         --repo|-R) repo="$2"; shift ;;
         --body) body="$2"; shift ;;
@@ -83,7 +94,10 @@ case "$sub" in
         case "$endpoint" in
             list)
                 [ -e "$D/$repo/pr_list_fails" ] && die "HTTP 502 (pull request listing failed)"
-                if [ "$head" = chore/runner-template ]; then
+                if [ "$head" = chore/coderabbit ]; then
+                    if [ -s "$D/$repo/open_pr.cr" ]; then out "$(jq -n --arg u "$(cat "$D/$repo/open_pr.cr")" '[{url:$u, isCrossRepository:false}]')"
+                    else out '[]'; fi
+                elif [ "$head" = chore/runner-template ]; then
                     if [ -s "$D/$repo/open_pr.rt" ]; then out "$(jq -n --arg u "$(cat "$D/$repo/open_pr.rt")" '[{url:$u}]')"
                     else out '[]'; fi
                 else
@@ -93,7 +107,8 @@ case "$sub" in
                     out "$list"
                 fi ;;
             create)
-                if [ "$head" = chore/runner-template ]; then printf '%s' "$body" > "$D/$repo/rt-pr.body"
+                if [ "$head" = chore/coderabbit ]; then printf '%s' "$body" > "$D/$repo/cr-pr.body"
+                elif [ "$head" = chore/runner-template ]; then printf '%s' "$body" > "$D/$repo/rt-pr.body"
                 else printf '%s' "$body" > "$D/$repo/pr.body"; fi
                 echo "https://github.com/$repo/pull/4242" ;;
             close)
@@ -139,8 +154,27 @@ case "$sub" in
             "PUT /contents/.github/workflows/"*)
                 f="${tail#/contents/.github/workflows/}"
                 mkdir -p "$R/rt-put"; printf '%s' "$content" > "$R/rt-put/$f"; out '{"content":{}}' ;;
+            "GET /contents/.coderabbit.yaml"|"GET /contents/.coderabbit.local.yaml"|"GET /contents/.coderabbit.yml")
+                f="${tail#/contents/}"
+                case "$query" in
+                    ref=main) [ -e "$R/cr-fail/$f" ] && die "HTTP 502 (contents lookup failed)"; src="$R/cr/$f" ;;
+                    ref=chore/coderabbit) src="$R/cr-branch/$f" ;;
+                    *) unknown ;;
+                esac
+                [ -e "$src" ] || die "Not Found (HTTP 404)"
+                if [ -e "$R/cr-too-large" ]; then out '{"sha":"abc","content":"","encoding":"none"}'; else out "$(file_json "$src")"; fi ;;
+            "PUT /contents/.coderabbit.yaml"|"PUT /contents/.coderabbit.local.yaml")
+                f="${tail#/contents/}"; [ "$branch" = chore/coderabbit ] || die "PUT to $branch, not chore/coderabbit"
+                mkdir -p "$R/cr-put"; printf '%s' "$content" | base64 -d > "$R/cr-put/$f"; printf '%s' "$sha" > "$R/cr-put/$f.sha"
+                printf '%s\n' "$f" >> "$R/cr-put.order"; out '{"content":{}}' ;;
+            "DELETE /contents/.coderabbit.yml")
+                f="${tail#/contents/}"; [ "$branch" = chore/coderabbit ] || die "DELETE on $branch, not chore/coderabbit"
+                mkdir -p "$R/cr-del"; printf '%s' "$sha" > "$R/cr-del/$f"; printf '%s\n' "-$f" >> "$R/cr-put.order"; out '{"commit":{}}' ;;
+            "GET /git/refs/heads/chore/coderabbit") out '{"ref":"refs/heads/chore/coderabbit"}' ;;
             "GET /git/ref/heads/main") out '{"object":{"sha":"0000000000000000000000000000000000000001"}}' ;;
-            "POST /git/refs") out '{"ref":"refs/heads/chore/post-commit"}' ;;
+            "POST /git/refs")
+                [ -e "$R/cr-branch-exists" ] && die "Reference already exists (HTTP 422)"
+                out '{"ref":"refs/heads/chore/post-commit"}' ;;
             "GET /git/refs/heads/chore/post-commit") out '{"ref":"refs/heads/chore/post-commit"}' ;;
             "GET /git/refs/heads/chore/runner-template") out '{"ref":"refs/heads/chore/runner-template"}' ;;
             "GET /rulesets") out '[{"id":1,"name":"post-commit"}]' ;;

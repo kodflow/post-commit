@@ -1,0 +1,331 @@
+# yaml-language-server: $schema=https://www.coderabbit.ai/integrations/schema.v2.json
+# CodeRabbit Universal Configuration
+# Compatible with any project — personalized by /init
+
+# ─── Root Settings ────────────────────────────────────────────────────────────
+
+language: "en-US"
+tone_instructions: "Evidence-based, concise, actionable. Prioritize: correctness, security, design, quality. Require concrete evidence for every finding. CRITICAL needs near-certainty. Omit speculative findings."
+early_access: true
+enable_free_tier: true
+inheritance: false
+
+# ─── Reviews ──────────────────────────────────────────────────────────────────
+
+reviews:
+  profile: "assertive"
+  request_changes_workflow: true
+
+  # Summary & Descriptions
+  high_level_summary: true
+  high_level_summary_instructions: >
+    Structure the summary as: **What** (one sentence describing the change),
+    **Why** (motivation or issue reference), **How** (implementation approach),
+    **Risk** (breaking changes, migration steps, or rollback considerations).
+    Flag risk zones: auth/crypto/secrets changes, concurrency patterns, state machines,
+    database migrations, supply chain updates, and caching invalidation.
+    Flag any new dependencies, public API changes, or security-sensitive modifications.
+    Omit sections that don't apply — keep it concise.
+  high_level_summary_placeholder: "@coderabbitai summary"
+  high_level_summary_in_walkthrough: false
+
+  # Auto Title
+  auto_title_placeholder: "@coderabbitai"
+  auto_title_instructions: >
+    Use conventional commit format: type(scope): description.
+    Types: feat, fix, docs, refactor, test, chore, perf, ci, security.
+    Scope should reflect the most impacted module or directory.
+    Keep under 72 characters. Use imperative mood.
+
+  # Display Options
+  review_status: true
+  review_details: true
+  commit_status: true
+  fail_commit_status: false
+  collapse_walkthrough: false
+
+  # Content Sections
+  changed_files_summary: true
+  sequence_diagrams: true
+  estimate_code_review_effort: true
+  assess_linked_issues: true
+  related_issues: true
+  related_prs: true
+  suggested_labels: true
+  suggested_reviewers: false
+
+  # Labels (inspired by /review risk model)
+  labeling_instructions:
+    - label: "dependencies"
+      instructions: "Apply when package dependencies, base images, or tool versions are updated."
+    - label: "breaking-change"
+      instructions: "Apply when public APIs, interfaces, or configuration formats change incompatibly."
+    - label: "security"
+      instructions: "Apply when changes touch authentication, authorization, secrets, or cryptography."
+    - label: "concurrency"
+      instructions: "Apply when changes involve goroutines, mutexes, channels, locks, atomics, or async patterns."
+    - label: "database"
+      instructions: "Apply when changes involve migrations, schema changes, SQL, ORM models, or query logic."
+    - label: "performance"
+      instructions: "Apply when changes affect caching, pagination, pooling, lazy loading, or hot paths."
+    - label: "shell"
+      instructions: "Apply when changes modify shell scripts, Dockerfiles, CI/CD configs, or Makefiles."
+    - label: "correctness"
+      instructions: "Apply when changes touch state machines, error handling, boundary conditions, or invariants."
+  auto_apply_labels: true
+  auto_assign_reviewers: false
+
+  # UI
+  in_progress_fortune: false
+  poem: false
+  enable_prompt_for_ai_agents: true
+
+  # Filtering
+  path_filters:
+    - "!**/.DS_Store"
+    - "!**/*.tar.gz"
+    - "!**/*.whl"
+    - "!**/*.min.js"
+    - "!**/*.min.css"
+    - "!**/*.map"
+    - "!**/node_modules/**"
+    - "!**/.git/**"
+    - "!**/vendor/**"
+    - "!**/dist/**"
+    - "!**/build/**"
+    - "!**/__pycache__/**"
+    - "!**/target/debug/**"
+    - "!**/target/release/**"
+    - "!**/.terraform/**"
+    - "!**/coverage/**"
+  path_instructions:
+    - path: "**/{*.lock,package-lock.json,go.sum,pnpm-lock.yaml,yarn.lock}"
+      instructions: |
+        Treat lockfiles as generated dependency snapshots.
+        Focus on high-signal changes only:
+        - New or removed direct dependencies
+        - Unexpected major version jumps
+        - Dependency source, registry, or resolution changes
+        Ignore formatting, ordering, or transitive reordering churn.
+    - path: "**/*.sh"
+      instructions: "Validate shell safety: strict mode, quoting, exit-on-error behavior, and command injection risks."
+    - path: "**/*.{yml,yaml}"
+      instructions: "Validate CI/CD workflow safety, least-privilege permissions, and secret handling."
+    - path: "**/Dockerfile*"
+      instructions: "Check image hardening, pinning strategy, non-root runtime, and multi-stage build hygiene."
+
+  # Abort & Cache
+  abort_on_close: true
+  disable_cache: false
+
+  # ─── Auto Review ──────────────────────────────────────────────────────────
+
+  auto_review:
+    # Sync PRs opened by kodflow-ci[bot] (post-commit enforce, runner-template) are
+    # excluded from review to save the CodeRabbit quota; the same lists live in
+    # kodflow/making.codes coderabbit/override-*.yaml.
+    ignore_usernames:
+      - "kodflow-ci[bot]"
+    enabled: true
+    auto_incremental_review: true
+    auto_pause_after_reviewed_commits: 10
+    ignore_title_keywords:
+      - "WIP"
+      - "wip"
+      - "DO NOT MERGE"
+      - "draft"
+      - "ci(post-commit): sync the gate workflow with the central stub"
+      - "ci(runner-template): sync the stubs with kodflow/post-commit"
+      - "ci: add the mandatory post-commit gate"
+      - "ci: run every job on the self-hosted kodflow-runner"
+    labels: []
+    drafts: false
+    base_branches:
+      - "main"
+
+  # ─── Finishing Touches ────────────────────────────────────────────────────
+
+  finishing_touches:
+    docstrings:
+      enabled: true
+    unit_tests:
+      enabled: true
+
+  # ─── Pre-merge Checks ────────────────────────────────────────────────────
+
+  pre_merge_checks:
+    title:
+      mode: "warning"
+      requirements: "Must follow conventional commit format: type(scope): description"
+    description:
+      mode: "warning"
+    issue_assessment:
+      mode: "off"
+    docstrings:
+      mode: "off"
+      threshold: 50
+
+  # ─── Tools (all enabled — CodeRabbit auto-detects relevance) ─────────────
+
+  tools:
+    shellcheck:
+      enabled: true
+    hadolint:
+      enabled: true
+    yamllint:
+      enabled: true
+    markdownlint:
+      enabled: true
+    actionlint:
+      enabled: true
+    github-checks:
+      enabled: true
+    gitleaks:
+      enabled: true
+    trufflehog:
+      enabled: true
+    trivy:
+      enabled: true
+    checkov:
+      enabled: true
+    osvScanner:
+      enabled: true
+    tflint:
+      enabled: true
+    ruff:
+      enabled: true
+    pylint:
+      enabled: true
+    flake8:
+      enabled: true
+    eslint:
+      enabled: true
+    biome:
+      enabled: true
+    golangci-lint:
+      enabled: true
+    clippy:
+      enabled: true
+    rubocop:
+      enabled: true
+    phpstan:
+      enabled: true
+    phpmd:
+      enabled: true
+    phpcs:
+      enabled: true
+    detekt:
+      enabled: true
+    swiftlint:
+      enabled: true
+    pmd:
+      enabled: true
+    cppcheck:
+      enabled: true
+    clang:
+      enabled: true
+    luacheck:
+      enabled: true
+    sqlfluff:
+      enabled: true
+    fortitudeLint:
+      enabled: true
+    dotenvLint:
+      enabled: true
+    htmlhint:
+      enabled: true
+    stylelint:
+      enabled: true
+    checkmake:
+      enabled: true
+    oxc:
+      enabled: true
+    buf:
+      enabled: true
+    regal:
+      enabled: true
+    ast-grep:
+      essential_rules: true
+    languagetool:
+      enabled: false
+    opengrep:
+      enabled: true
+    semgrep:
+      enabled: true
+    circleci:
+      enabled: true
+    prismaLint:
+      enabled: true
+    shopifyThemeCheck:
+      enabled: true
+    brakeman:
+      enabled: true
+    blinter:
+      enabled: true
+    psscriptanalyzer:
+      enabled: true
+
+# ─── Chat ─────────────────────────────────────────────────────────────────────
+
+chat:
+  art: false
+  auto_reply: true
+  integrations:
+    jira:
+      usage: "disabled"
+    linear:
+      usage: "disabled"
+
+# ─── Knowledge Base ───────────────────────────────────────────────────────────
+
+knowledge_base:
+  opt_out: false
+  web_search:
+    enabled: true
+  code_guidelines:
+    enabled: true
+    filePatterns: []
+  learnings:
+    scope: "auto"
+  issues:
+    scope: "auto"
+  pull_requests:
+    scope: "auto"
+
+# ─── Code Generation ─────────────────────────────────────────────────────────
+
+code_generation:
+  docstrings:
+    language: "en-US"
+    path_instructions: []
+  unit_tests:
+    path_instructions: []
+
+# ─── Issue Enrichment ─────────────────────────────────────────────────────────
+
+issue_enrichment:
+  auto_enrich:
+    enabled: false
+  planning:
+    enabled: true
+    auto_planning:
+      enabled: true
+      labels:
+        - "feat"
+        - "feature"
+        - "enhancement"
+  labeling:
+    labeling_instructions:
+      - label: "bug"
+        instructions: "Apply when the issue describes broken functionality or unexpected behavior."
+      - label: "enhancement"
+        instructions: "Apply when the issue requests new functionality or improvements."
+      - label: "documentation"
+        instructions: "Apply when the issue is about documentation files."
+      - label: "security"
+        instructions: "Apply when the issue involves authentication, authorization, secrets, or cryptography."
+      - label: "performance"
+        instructions: "Apply when the issue reports slow performance, caching, or resource usage problems."
+      - label: "concurrency"
+        instructions: "Apply when the issue involves race conditions, deadlocks, or async/parallel execution."
+    auto_apply_labels: true
