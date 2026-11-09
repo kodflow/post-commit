@@ -1,0 +1,11 @@
+# What a repository WITHOUT a .coderabbit.local.yaml is rendered from, under
+# the managed part. It is not merged with a local file: once a repository has
+# one, that file is its whole local part, and these defaults no longer apply.
+#
+# A repository that had no CodeRabbit file was configured by the dashboard
+# (Organization Settings on kodflow, repository settings elsewhere). A file
+# with inheritance off would replace all of that with schema defaults the day
+# it lands. With inheritance on, CodeRabbit merges the file with that parent
+# level instead: the parent's settings still apply, and its lists keep their
+# items with the managed ones in front.
+inheritance: true
