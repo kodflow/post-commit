@@ -562,7 +562,7 @@ rendered = local with managed laid on top
   add items after it. Mappings merge key by key, the local file's order kept.
 - **Today's managed keys**: `reviews.auto_review.ignore_usernames`
   (`kodflow-ci[bot]`) and `reviews.auto_review.ignore_title_keywords` (the
-  titles of the sync pull requests), so the pull requests this repository opens
+  titles of the sync pull requests, this one's included), so the pull requests this repository opens
   everywhere do not spend the CodeRabbit quota; on kitsunium,
   `reviews.auto_approvals.allow_author_approval: false` too.
 - **No local file** means the defaults: `inheritance: true`, so a repository

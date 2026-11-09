@@ -17,9 +17,9 @@ reviews:
     # The pull requests kodflow-ci opens (gate sync, runner-template stubs,
     # this file's own sync) are mechanical copies of a reviewed change here.
     # Reviewing them again on every repository spends the CodeRabbit quota on
-    # nothing. The username catches all of them; the titles are the ones the
-    # 08/11/2026 decision named, and catch those pull requests when someone
-    # reopens one under their own account.
+    # nothing. The username catches all of them; the titles (the 08/11/2026
+    # decision's four, and this file's own sync title added on 09/11/2026)
+    # catch those pull requests when someone reopens one under their own account.
     ignore_usernames:
       - "kodflow-ci[bot]"
     ignore_title_keywords:
@@ -27,3 +27,4 @@ reviews:
       - "ci(runner-template): sync the stubs with kodflow/post-commit"
       - "ci: add the mandatory post-commit gate"
       - "ci: run every job on the self-hosted kodflow-runner"
+      - "ci(coderabbit): sync .coderabbit.yaml with the central template"

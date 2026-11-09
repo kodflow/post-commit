@@ -26,6 +26,7 @@ TITLES = [
     "ci(runner-template): sync the stubs with kodflow/post-commit",
     "ci: add the mandatory post-commit gate",
     "ci: run every job on the self-hosted kodflow-runner",
+    "ci(coderabbit): sync .coderabbit.yaml with the central template",
 ]
 
 try:
@@ -122,6 +123,12 @@ class CentralPart(unittest.TestCase):
             m = cr.Central(STUB, owner).managed
             self.assertEqual(m["reviews"]["auto_review"]["ignore_usernames"], ["kodflow-ci[bot]"])
             self.assertEqual(m["reviews"]["auto_review"]["ignore_title_keywords"], TITLES)
+
+    def test_the_sync_title_enforce_uses_is_excluded(self):
+        # The title enforce.sh opens its own sync under must be one of them.
+        with open(os.path.join(ROOT, "scripts", "enforce.sh"), encoding="utf-8") as fh:
+            title = next(ln.split('"', 2)[1] for ln in fh if ln.startswith("CR_TITLE="))
+        self.assertIn(title, cr.Central(STUB, "kodflow").managed["reviews"]["auto_review"]["ignore_title_keywords"])
 
     def test_kitsunium_alone_refuses_author_approval(self):
         self.assertIs(cr.Central(STUB, "kitsunium").managed["reviews"]["auto_approvals"]
@@ -237,11 +244,14 @@ class Migration(unittest.TestCase):
                     self.assertNotIn(title, local)
                 self.assertIn("### What changes in the configuration CodeRabbit reads", body)
 
-    def test_already_excluded_files_change_nothing_but_the_order(self):
-        _, write, _, body, _ = run_plan("kitsunium", {cr.YAML: text(os.path.join(FIX, "kitsunium-sdk.yaml"))})
-        self.assertIn("- nothing: the configuration CodeRabbit reads is the same", body)
-        _, _, _, body, _ = run_plan("kodflow", {cr.YAML: text(os.path.join(FIX, "kodflow-ktn-linter-excerpt.yaml"))})
-        self.assertIn("`reviews.auto_review.ignore_title_keywords`: same items, another order", body)
+    def test_already_excluded_files_gain_only_the_fifth_title(self):
+        # The 9 files excluded by hand on 08/11/2026 carry the first four titles;
+        # the only thing CodeRabbit reads differently is the fifth, added 09/11.
+        fifth = '- `reviews.auto_review.ignore_title_keywords`: added "' + TITLES[4] + '"\n'
+        for owner, name in (("kitsunium", "kitsunium-sdk.yaml"), ("kodflow", "kodflow-ktn-linter-excerpt.yaml")):
+            body = run_plan(owner, {cr.YAML: text(os.path.join(FIX, name))})[3]
+            section = body.split("### What changes")[1].split("### The keys")[0]
+            self.assertEqual([ln for ln in section.split("\n") if ln.startswith("- ")], [fifth.rstrip("\n")], name)
         local = run_plan("kodflow", {cr.YAML: text(os.path.join(FIX, "kodflow-ktn-linter-excerpt.yaml"))})[1][cr.LOCAL]
         kw = cr.load_text(local, "l")["reviews"]["auto_review"]["ignore_title_keywords"]
         self.assertEqual(kw, ["WIP", "DO NOT MERGE", "DRAFT"])

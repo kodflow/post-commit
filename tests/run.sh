@@ -1526,7 +1526,8 @@ crwant kitsunium "$CRW/sdk.local" > "$CRW/want.yaml"
 cmp -s "$CRW/sdk.yaml" "$CRW/want.yaml"; eok "...the rendering is that of the local part" $?
 grep -q 'allow_author_approval: false' "$CRW/sdk.yaml"; eok "...and carries kitsunium's managed key" $?
 ! grep -q 'kodflow-ci' "$CRW/sdk.local"; eok "...the hand-written exclusion left the local part" $?
-grep -qF -- '- nothing: the configuration CodeRabbit reads is the same' "$fx/kitsunium/sdk/cr-pr.body"; eok "...and the body shows the semantic diff: nothing" $?
+grep -qF -- '`reviews.auto_review.ignore_title_keywords`: added "ci(coderabbit): sync .coderabbit.yaml with the central template"' "$fx/kitsunium/sdk/cr-pr.body"
+eok "...and the body shows the semantic diff: only the fifth title" $?
 if [ ! -s "$fx/kitsunium/sdk/cr-put/.coderabbit.yaml.sha" ]; then rc=0; else rc=1; fi; eok "...files new on the branch are created, not updated" "$rc"
 
 # Once that is merged, the next run has nothing to do.
