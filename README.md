@@ -537,7 +537,10 @@ The same enforce run keeps one more file in place on every repository of
 **kodflow, kitsunium and supervizio**: `.coderabbit.yaml`. CodeRabbit's
 Organization Settings and global overrides only take effect on kodflow; on the
 other two owners the file is the only lever, so the file is what this
-repository imposes. kodmain is not covered.
+repository imposes. kodmain is not covered: the CodeRabbit app is not
+installed there, so a file would configure nothing. A security advisory's
+temporary private fork (`<repo>-ghsa-<id>`) is reported `skip:advisory-fork`
+and never touched.
 
 CodeRabbit reads one file (`.coderabbit.yaml`, or the older `.coderabbit.yml`),
 and YAML cannot hold two `reviews:` keys, so the two owners of that file get

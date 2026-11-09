@@ -76,7 +76,10 @@ RT_BRANCH="chore/runner-template"
 # The CodeRabbit configuration: a central part imposed on every repository of
 # these owners, rendered with each repository's own .coderabbit.local.yaml into
 # the one file CodeRabbit reads. scripts/coderabbit.py does the YAML; this
-# script only moves files. kodmain is left out: no CodeRabbit decision covers it.
+# script only moves files. kodmain is left out: the CodeRabbit app is not
+# installed there (checked 09/11/2026: not among the organization's
+# installations, no coderabbitai[bot] comment on any of its repositories), so
+# a file there would configure nothing. Install the app, then add the owner.
 CR_ROOT="$SCRIPT_DIR/../stub/coderabbit"
 CR_PY="$SCRIPT_DIR/coderabbit.py"
 CR_BRANCH="chore/coderabbit"
@@ -666,6 +669,10 @@ ensure_coderabbit() {   # ensure_coderabbit <owner/repo> <default-branch> -> CR_
     local repo="$1" db="$2" owner="${1%%/*}" d f rc kind names=() del=() sha out n=0 args py
     CR_STATE=""; CR_PR=""; CR_NOTE=""
     case " ${CR_OWNERS[*]} " in *" $owner "*) ;; *) return 0 ;; esac
+    # A GitHub security advisory's temporary private fork (<repo>-ghsa-<id>)
+    # lives until the advisory is published and its fix merged upstream: a
+    # sync pull request there would only be noise in a private fix.
+    case "${repo#*/}" in *-ghsa-*) CR_STATE="skip:advisory-fork"; return ;; esac
     py="${PC_YAML_PYTHON:-python3}"
     "$py" -c 'import yaml' 2>/dev/null || { CR_STATE="error:no-python-yaml"; return; }
     d="$WORKDIR/cr"; rm -rf "$d"; mkdir -p "$d/db" "$d/branch" "$d/plan"

@@ -1594,7 +1594,13 @@ grep -q 'coderabbit=error:pr-lookup' <<< "$EOUT"; eok "the pull request lookup f
 fx="$(crfx kodflow/fresh)"; EOUT="$(PC_YAML_PYTHON=false erun "$fx" --apply kodflow/fresh)"; rc=$?
 grep -q 'coderabbit=error:no-python-yaml' <<< "$EOUT" && [ "$rc" -eq 1 ]; eok "no python with PyYAML: an error, never a file written on a guess" $?
 
-# Owners outside the decision, and the report.
+# Owners outside the decision, advisory forks, and the report.
+fx="$(crfx kodflow/forgejo-raft-ghsa-jm7r-gcr4-vgf3 .coderabbit.yaml="$CRFIX/kodflow-forgejo-raft.yaml")"; EOUT="$(erun "$fx" --apply kodflow/forgejo-raft-ghsa-jm7r-gcr4-vgf3)"; rc=$?
+grep -q 'coderabbit=skip:advisory-fork' <<< "$EOUT"; eok "a security advisory fork: skip:advisory-fork" $?
+! grep -q 'coderabbit' "$fx/calls.log"; eok "...no CodeRabbit file read, nothing written" $?
+eok "...and the run exits 0" "$rc"
+fx="$(crfx kodflow/ghsa-tools)"; EOUT="$(erun "$fx" kodflow/ghsa-tools)"
+grep -q 'coderabbit=create:would-sync' <<< "$EOUT"; eok "...while a name merely containing ghsa is covered" $?
 fx="$(efx kodmain/shaker-api private "$STUB")"; EOUT="$(erun "$fx" --apply kodmain/shaker-api)"
 ! grep -q 'coderabbit=' <<< "$EOUT" && ! grep -q 'coderabbit' "$fx/calls.log"; eok "kodmain: no CodeRabbit row, no CodeRabbit call" $?
 fx="$(crfx kodflow/fresh)"; EOUT="$(erun "$fx" --report "$fx/report.md" kodflow/fresh)"
