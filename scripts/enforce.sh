@@ -649,6 +649,10 @@ ensure_rt_stubs() {   # ensure_rt_stubs <owner/repo> <default-branch> -> RT_STAT
 cr_get() {   # cr_get <owner/repo> <path> <ref> <outfile> -> rc 0 found, 1 absent (404), 2 lookup failed
     local json
     if json="$(gh api "repos/$1/contents/$2?ref=$3" 2>"$WORKDIR/cr-get.err")"; then
+        # Only base64 content is content: a file over the API's size limit
+        # comes back with encoding "none" and no content, and decoding the
+        # string "null" would hand the planner garbage as the file.
+        printf '%s' "$json" | jq -e '.encoding == "base64" and (.content | type) == "string"' >/dev/null 2>&1 || return 2
         printf '%s' "$json" | jq -r .sha > "$4.sha" 2>/dev/null || return 2
         printf '%s' "$json" | jq -r .content | base64 -d > "$4" 2>/dev/null || return 2
         return 0
@@ -715,10 +719,19 @@ ensure_coderabbit() {   # ensure_coderabbit <owner/repo> <default-branch> -> CR_
     fi
 
     if [ -z "$CR_PR" ]; then
+        # No sync open, so the branch must not exist: one that does was left
+        # behind by hand (enforce closes its own with --delete-branch) and may
+        # carry anything. It is never reused for a new pull request.
         sha="$(gh api "repos/$repo/git/ref/heads/$db" --jq .object.sha 2>/dev/null)" || { CR_STATE="error:no-sha"; return; }
-        gh api "repos/$repo/git/refs" -X POST -f ref="refs/heads/$CR_BRANCH" -f sha="$sha" >/dev/null 2>&1 \
-            || gh api "repos/$repo/git/refs/heads/$CR_BRANCH" >/dev/null 2>&1 \
-            || { CR_STATE="error:branch"; return; }
+        if ! gh api "repos/$repo/git/refs" -X POST -f ref="refs/heads/$CR_BRANCH" -f sha="$sha" >/dev/null 2>&1; then
+            if gh api "repos/$repo/git/refs/heads/$CR_BRANCH" >/dev/null 2>&1; then
+                CR_STATE="error:stale-branch"
+                echo "::error::$repo: $CR_BRANCH exists with no open sync pull request; delete it after checking what it carries" >&2
+            else
+                CR_STATE="error:branch"
+            fi
+            return
+        fi
     fi
     # Only what the branch does not already carry is written, so a re-run is a
     # no-op and an open pull request is updated rather than duplicated.

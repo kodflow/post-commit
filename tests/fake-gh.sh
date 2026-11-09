@@ -30,6 +30,8 @@
 #   cr-fail/<file>  present: reading that file on the default branch fails
 #                   with HTTP 502 (not a 404)
 #   open_pr.cr      a URL: an open pull request on chore/coderabbit
+#   cr-branch-exists  present: creating a branch fails, as for one left behind
+#   cr-too-large    present: a CodeRabbit file comes back with encoding "none"
 #   pr_list_fails   present: listing pull requests fails
 #   empty           present: the repository has no default branch
 #
@@ -160,7 +162,7 @@ case "$sub" in
                     *) unknown ;;
                 esac
                 [ -e "$src" ] || die "Not Found (HTTP 404)"
-                out "$(file_json "$src")" ;;
+                if [ -e "$R/cr-too-large" ]; then out '{"sha":"abc","content":"","encoding":"none"}'; else out "$(file_json "$src")"; fi ;;
             "PUT /contents/.coderabbit.yaml"|"PUT /contents/.coderabbit.local.yaml")
                 f="${tail#/contents/}"; [ "$branch" = chore/coderabbit ] || die "PUT to $branch, not chore/coderabbit"
                 mkdir -p "$R/cr-put"; printf '%s' "$content" | base64 -d > "$R/cr-put/$f"; printf '%s' "$sha" > "$R/cr-put/$f.sha"
@@ -170,7 +172,9 @@ case "$sub" in
                 mkdir -p "$R/cr-del"; printf '%s' "$sha" > "$R/cr-del/$f"; printf '%s\n' "-$f" >> "$R/cr-put.order"; out '{"commit":{}}' ;;
             "GET /git/refs/heads/chore/coderabbit") out '{"ref":"refs/heads/chore/coderabbit"}' ;;
             "GET /git/ref/heads/main") out '{"object":{"sha":"0000000000000000000000000000000000000001"}}' ;;
-            "POST /git/refs") out '{"ref":"refs/heads/chore/post-commit"}' ;;
+            "POST /git/refs")
+                [ -e "$R/cr-branch-exists" ] && die "Reference already exists (HTTP 422)"
+                out '{"ref":"refs/heads/chore/post-commit"}' ;;
             "GET /git/refs/heads/chore/post-commit") out '{"ref":"refs/heads/chore/post-commit"}' ;;
             "GET /git/refs/heads/chore/runner-template") out '{"ref":"refs/heads/chore/runner-template"}' ;;
             "GET /rulesets") out '[{"id":1,"name":"post-commit"}]' ;;

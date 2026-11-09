@@ -1594,6 +1594,17 @@ grep -q 'coderabbit=error:pr-lookup' <<< "$EOUT"; eok "the pull request lookup f
 fx="$(crfx kodflow/fresh)"; EOUT="$(PC_YAML_PYTHON=false erun "$fx" --apply kodflow/fresh)"; rc=$?
 grep -q 'coderabbit=error:no-python-yaml' <<< "$EOUT" && [ "$rc" -eq 1 ]; eok "no python with PyYAML: an error, never a file written on a guess" $?
 
+# A branch left behind with no sync open is never reused; a file the API
+# returns without base64 content is a failed read, not a file.
+fx="$(crfx kodflow/fresh)"; : > "$fx/kodflow/fresh/cr-branch-exists"
+EOUT="$(erun "$fx" --apply kodflow/fresh)"; rc=$?
+grep -q 'coderabbit=error:stale-branch' <<< "$EOUT" && [ "$rc" -eq 1 ]; eok "chore/coderabbit left behind, no sync open: an error, the branch not reused" $?
+! grep -qE -- 'contents/\.coderabbit[^ ]* -X PUT|^pr create .*--head chore/coderabbit' "$fx/calls.log"; eok "...nothing written to it, no pull request" $?
+fx="$(crfx kodflow/big .coderabbit.yaml="$CRFIX/kodflow-view.yaml")"; : > "$fx/kodflow/big/cr-too-large"
+EOUT="$(erun "$fx" --apply kodflow/big)"
+grep -q 'coderabbit=error:read:' <<< "$EOUT"; eok "a file returned without base64 content: an error, not garbage" $?
+! crwrites "$fx"; eok "...nothing written" $?
+
 # Owners outside the decision, advisory forks, and the report.
 fx="$(crfx kodflow/forgejo-raft-ghsa-jm7r-gcr4-vgf3 .coderabbit.yaml="$CRFIX/kodflow-forgejo-raft.yaml")"; EOUT="$(erun "$fx" --apply kodflow/forgejo-raft-ghsa-jm7r-gcr4-vgf3)"; rc=$?
 grep -q 'coderabbit=skip:advisory-fork' <<< "$EOUT"; eok "a security advisory fork: skip:advisory-fork" $?
