@@ -119,6 +119,10 @@ def _mapping(loader, node, deep=False):
     seen = {}
     for key_node, _ in node.value:
         key = loader.construct_object(key_node, deep=True)
+        try:
+            hash(key)
+        except TypeError:
+            raise Refused(f"a key that is not a scalar at line {key_node.start_mark.line + 1}") from None
         if key in seen:
             raise Refused(f"duplicate key {key!r} at line {key_node.start_mark.line + 1}"
                           f" (first at line {seen[key] + 1})")
@@ -523,8 +527,11 @@ def read(d, name):
     p = os.path.join(d, name)
     if not os.path.exists(p):
         return None
-    with open(p, encoding="utf-8") as fh:
-        return fh.read()
+    try:
+        with open(p, encoding="utf-8") as fh:
+            return fh.read()
+    except UnicodeDecodeError:
+        raise Refused(f"{name} is not UTF-8") from None
 
 
 def plan(central, current):

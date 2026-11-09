@@ -68,6 +68,17 @@ class Yaml12(unittest.TestCase):
         with self.assertRaises(cr.Refused):
             cr.load_text("reviews:\n  profile: chill\nreviews:\n  profile: assertive\n", "t")
 
+    def test_complex_key_refused(self):
+        with self.assertRaises(cr.Refused):
+            cr.load_text("? [a, b]\n: x\n", "t")
+
+    def test_not_utf8_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            with open(os.path.join(d, cr.LOCAL), "wb") as fh:
+                fh.write(b"language: \xff\n")
+            with self.assertRaises(cr.Refused):
+                cr.plan(cr.Central(STUB, "kodflow"), d)
+
     def test_not_a_mapping_refused(self):
         with self.assertRaises(cr.Refused):
             cr.load_text("- a\n- b\n", "t")
