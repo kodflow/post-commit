@@ -36,7 +36,7 @@ jobs:
         run: |
           python3 - <<'PY'
           import yaml, glob
-          for f in ['action.yml', 'block-merge/action.yml', 'stub/post-commit.yml'] + sorted(glob.glob('stub/runner-template/*/*.yml')) + sorted(glob.glob('stub/coderabbit/**/*.yaml', recursive=True)) + sorted(glob.glob('.github/workflows/*.yml')):
+          for f in ['action.yml', 'block-merge/action.yml', 'stub/post-commit.yml'] + sorted(glob.glob('stub/runner-template/*/*.yml')) + sorted(glob.glob('stub/coderabbit/**/*.yaml', recursive=True)) + sorted(glob.glob('coderabbit/**/*.yaml', recursive=True)) + sorted(glob.glob('.github/workflows/*.yml')):
               yaml.safe_load(open(f)); print('ok', f)
           PY
 

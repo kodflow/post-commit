@@ -618,6 +618,18 @@ python3 scripts/coderabbit.py validate --root stub/coderabbit path/to/.coderabbi
 python3 scripts/coderabbit.py diff before.yaml after.yaml
 ```
 
+### The Organization Settings and the metrics
+
+What CodeRabbit's dashboard holds, and `enforce` cannot write, lives in
+[`coderabbit/`](coderabbit/README.md): the Organization Settings pasted by hand
+(`coderabbit/settings.yaml`), the dashboard's state before any override
+(`coderabbit/baseline/`), how to paste and roll back, and the checks played
+after a paste. They validate against the same pinned schema as the stub, in
+`tests/coderabbit_org_test.py`. `scripts/coderabbit_metrics.py` measures, per
+owner, how many pull requests were reviewed, refused for quota or merged
+unreviewed; its reports name private repositories and are written to
+`build/coderabbit/reports/`, which git ignores.
+
 ## Rewriting history
 
 `scripts/rewrite-history.sh owner/repo` is a **dry run**: it mirrors the
@@ -721,6 +733,7 @@ scripts/foreign-history.txt   repositories judged in foreign-history mode (forks
 scripts/denied-identities.txt SHA-256 of the identities no commit may carry there
 scripts/enforce.sh            fleet: stub PR + ruleset + runner-template stubs + .coderabbit.yaml, idempotent
 scripts/coderabbit.py         render, check and migrate .coderabbit.yaml (python3 + PyYAML only)
+scripts/coderabbit_metrics.py weekly CodeRabbit report (stdlib), written to build/coderabbit/reports/
 scripts/bump-runner-template.sh  move every runner-template stub to one kodflow/runner-template commit
 scripts/rewrite-history.sh    history scrub (messages + identities), dry-run by default
 stub/post-commit.yml          the file installed in each repo
@@ -728,8 +741,10 @@ stub/pr-body.md               the PR body enforce.sh uses
 stub/runner-template/<owner>/ the stubs installed in each <owner>/runner-template
 stub/runner-template-pr-body.md  the PR body of their sync
 stub/coderabbit/              the central CodeRabbit part, per-owner overlays, defaults, pinned schema
+coderabbit/                   the Organization Settings (pasted by hand), their baseline, the runbook
 tests/run.sh                  behaviour tests against real throwaway repos
 tests/coderabbit_test.py      coderabbit.py: YAML, merge, schema (+ jsonschema oracle), migration
+tests/coderabbit_org_test.py  coderabbit/ against the schema, coderabbit_metrics.py parsers and output
 tests/fixtures/coderabbit/    real hand-written files of public repositories, and a ktn-linter excerpt
 .github/workflows/ci.yml      shellcheck + tests + YAML + dogfood (uses: ./)
 .github/workflows/enforce.yml fleet enforcement from GitHub (kodflow-ci app tokens)

@@ -1,0 +1,112 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+tone_instructions: "Evidence-based, concise, actionable. Prioritize: correctness, security, design, quality. Require
+  concrete evidence for every finding. CRITICAL needs near-certainty. Omit speculative findings."
+
+early_access: true
+
+reviews:
+  profile: assertive
+  high_level_summary_instructions: >
+    Structure the summary as: **What** (one sentence describing the change), **Why** (motivation or issue reference),
+    **How** (implementation approach), **Risk** (breaking changes, migration steps, or rollback considerations). Flag
+    risk zones: auth/crypto/secrets changes, concurrency patterns, state machines, database migrations, supply chain
+    updates, and caching invalidation. Flag any new dependencies, public API changes, or security-sensitive
+    modifications. Omit sections that don't apply — keep it concise.
+  auto_title_instructions: >
+    Use conventional commit format: type(scope): description. Types: feat, fix, docs, refactor, test, chore, perf, ci,
+    security. Scope should reflect the most impacted module or directory. Keep under 72 characters. Use imperative mood.
+  review_details: true
+  collapse_walkthrough: false
+  labeling_instructions:
+    - label: dependencies
+      instructions: Apply when package dependencies, base images, or tool versions are updated.
+    - label: breaking-change
+      instructions: Apply when public APIs, interfaces, or configuration formats change incompatibly.
+    - label: security
+      instructions: Apply when changes touch authentication, authorization, secrets, or cryptography.
+    - label: concurrency
+      instructions: Apply when changes involve goroutines, mutexes, channels, locks, atomics, or async patterns.
+    - label: database
+      instructions: Apply when changes involve migrations, schema changes, SQL, ORM models, or query logic.
+    - label: performance
+      instructions: Apply when changes affect caching, pagination, pooling, lazy loading, or hot paths.
+    - label: shell
+      instructions: Apply when changes modify shell scripts, Dockerfiles, CI/CD configs, or Makefiles.
+    - label: correctness
+      instructions: Apply when changes touch state machines, error handling, boundary conditions, or invariants.
+  auto_apply_labels: true
+  suggested_reviewers: false
+  in_progress_fortune: false
+  path_filters:
+    - "!**/.DS_Store"
+    - "!**/*.tar.gz"
+    - "!**/*.whl"
+    - "!**/*.min.js"
+    - "!**/*.min.css"
+    - "!**/*.map"
+    - "!**/node_modules/**"
+    - "!**/.git/**"
+    - "!**/vendor/**"
+    - "!**/dist/**"
+    - "!**/build/**"
+    - "!**/__pycache__/**"
+    - "!**/target/debug/**"
+    - "!**/target/release/**"
+    - "!**/.terraform/**"
+    - "!**/coverage/**"
+    - "!**/*.lock"
+    - "!**/package-lock.json"
+    - "!**/go.sum"
+  auto_review:
+    auto_pause_after_reviewed_commits: 10
+    ignore_title_keywords:
+      - WIP
+      - wip
+      - DO NOT MERGE
+      - draft
+    base_branches:
+      - main
+  pre_merge_checks:
+    docstrings:
+      mode: off
+      threshold: 50
+    title:
+      requirements: "Must follow conventional commit format: type(scope): description"
+    issue_assessment:
+      mode: off
+  tools:
+    languagetool:
+      enabled: false
+  auto_approvals:
+    enabled: true
+
+chat:
+  art: false
+  integrations:
+    jira:
+      usage: disabled
+    linear:
+      usage: disabled
+
+issue_enrichment:
+  planning:
+    auto_planning:
+      labels:
+        - feat
+        - feature
+        - enhancement
+  labeling:
+    labeling_instructions:
+      - label: bug
+        instructions: Apply when the issue describes broken functionality or unexpected behavior.
+      - label: enhancement
+        instructions: Apply when the issue requests new functionality or improvements.
+      - label: documentation
+        instructions: Apply when the issue is about documentation files.
+      - label: security
+        instructions: Apply when the issue involves authentication, authorization, secrets, or cryptography.
+      - label: performance
+        instructions: Apply when the issue reports slow performance, caching, or resource usage problems.
+      - label: concurrency
+        instructions: Apply when the issue involves race conditions, deadlocks, or async/parallel execution.
+    auto_apply_labels: true

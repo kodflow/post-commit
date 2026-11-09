@@ -1154,6 +1154,22 @@ else
     FAIL=$((FAIL+1)); echo "  FAIL no python with PyYAML (set PC_YAML_PYTHON): coderabbit.py cannot be tested"
 fi
 
+echo "== coderabbit: organisation settings and metrics (tests/coderabbit_org_test.py) =="
+if "$CRPY" -c 'import yaml' 2>/dev/null; then
+    if out="$("$CRPY" -m unittest "$ROOT/tests/coderabbit_org_test.py" 2>&1)"; then
+        PASS=$((PASS+1)); printf '  ok   coderabbit_org_test.py: %s\n' "$(grep -E '^Ran [0-9]+ tests' <<< "$out")"
+    else
+        FAIL=$((FAIL+1)); printf '  FAIL coderabbit_org_test.py\n%s\n' "$(printf '%s' "$out" | sed 's/^/       /')"
+    fi
+    # Same rule as the schema oracle above: the settings are also held to the
+    # jsonschema package in CI, never only to the built-in validator.
+    if [ -n "${CI:-}" ] && grep -q 'skipped=' <<< "$out"; then
+        FAIL=$((FAIL+1)); echo "  FAIL the settings were not held to jsonschema in CI"
+    fi
+else
+    FAIL=$((FAIL+1)); echo "  FAIL no python with PyYAML (set PC_YAML_PYTHON): coderabbit_org_test.py cannot run"
+fi
+
 echo "== enforce: end to end, against a fake gh =="
 FAKEBIN="$(mktemp -d)"; ln -s "$ROOT/tests/fake-gh.sh" "$FAKEBIN/gh"
 # Every repository of kodflow, kitsunium and supervizio is also given its
