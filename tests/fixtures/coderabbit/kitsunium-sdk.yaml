@@ -1,0 +1,89 @@
+language: en-US
+early_access: false
+
+reviews:
+  profile: chill
+  request_changes_workflow: false
+  high_level_summary: true
+  poem: false
+  review_status: true
+  collapse_walkthrough: false
+  sequence_diagrams: false
+
+  path_filters:
+    - "!**/MODULE.bazel.lock"
+    - "!**/go.sum"
+    - "!**/*.pb.go"
+    - "!.bazel-cache/**"
+    - "!bazel-*/**"
+
+  path_instructions:
+    - path: "internal/kernel/**"
+      instructions: |
+        Kernel layer: MUST be stdlib-only AND generic (no domain vocabulary).
+        See internal/kernel/CLAUDE.md. Flag any non-stdlib import or domain-
+        specific naming (User, Request, Log, …) in this tree.
+    - path: "internal/core/**"
+      instructions: |
+        Core layer: domain interfaces + value types. May import stdlib,
+        internal/kernel and other internal/core packages; a lateral import
+        is not a layer violation (core/observe/trace and core/observe/metrics both build on
+        core/observe/otel, the attribute, resource and scope types they share).
+        Must NOT import internal/service, pkg/* or the repository's
+        third-party/ tree — the direction scripts/check-layer-deps.sh asserts
+        (ADR 0068).
+    - path: "internal/service/**"
+      instructions: |
+        Service layer: concrete implementations. May import stdlib,
+        internal/kernel, internal/core, other internal/service packages (a
+        lateral import is permitted, not tolerated: internal/CLAUDE.md
+        §Dependency direction, ADR 0054 §D7). The SDK module, whose
+        directory this is (ADR 0162), requires no module outside the standard
+        library: every codec is written on it and the semver is
+        internal/kernel/semver (ADR 0156), so a new vendor import here is a
+        finding — a vendor library is a third-party/ module of its own (ADR
+        0157). Must NOT import pkg/* or the repository's third-party/ tree
+        (ADR 0068).
+    - path: "pkg/v1/**"
+      instructions: |
+        Public stable v1 API. Frozen post-v1.0.0. Type aliases onto
+        internal/* are allowed (ADR 0074). The error model is constructable
+        here: pkg/v1/errs.New / Wrap are the public, runtime-validated
+        constructors (ADR 0019); only errs.Define stays internal
+        (pkg/CLAUDE.md "No constructors for internal types — except the error
+        model"). Flag any new exported identifier without godoc.
+    - path: "**/*_test.go"
+      instructions: |
+        Tests are table-driven, with the case body in a runCase closure
+        declared INSIDE the test function (runCase := func(t *testing.T,
+        c tc) { … }) so ktn-linter's static analyser sees direct calls. It is
+        not a package-level helper, and none exists (internal/CLAUDE.md
+        §Conventions). Each subtest must call t.Parallel() when the parent
+        does. Production errors flow through errs.Define / errs.Wrap; tests
+        may use t.Fatal / t.Errorf directly.
+    - path: "docs/adr/**"
+      instructions: |
+        ADRs are authoritative for the decisions they cover. If an ADR and
+        CLAUDE.md disagree, prefer the ADR and flag the CLAUDE.md mismatch.
+
+  # Sync PRs opened by kodflow-ci[bot] (post-commit enforce, runner-template) are
+  # excluded from review to save the CodeRabbit quota; the same lists live in
+  # kodflow/making.codes coderabbit/override-*.yaml.
+  auto_approvals:
+    allow_author_approval: false
+
+  auto_review:
+    enabled: true
+    drafts: false
+    base_branches:
+      - main
+    ignore_usernames:
+      - "kodflow-ci[bot]"
+    ignore_title_keywords:
+      - "ci(post-commit): sync the gate workflow with the central stub"
+      - "ci(runner-template): sync the stubs with kodflow/post-commit"
+      - "ci: add the mandatory post-commit gate"
+      - "ci: run every job on the self-hosted kodflow-runner"
+
+chat:
+  auto_reply: true

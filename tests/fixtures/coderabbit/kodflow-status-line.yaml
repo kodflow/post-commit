@@ -1,0 +1,217 @@
+# yaml-language-server: $schema=https://www.coderabbit.ai/integrations/schema.v2.json
+language: en-US
+tone_instructions: >
+  Be concise and Go-idiomatic. Focus on correctness, hexagonal layering
+  (no adapter types leaking into internal/domain), error surfacing, and
+  hot-path latency. Skip stylistic nits unless they obscure intent.
+early_access: true
+enable_free_tier: true
+inheritance: false
+
+reviews:
+  profile: assertive
+  request_changes_workflow: true
+  high_level_summary: true
+  high_level_summary_instructions: >
+    Summarize the PR in 2-3 bullets focused on user-visible behaviour,
+    correctness invariants touched, and hexagonal-boundary impact
+    (domain ↔ adapter ↔ application). Mention which segments of the
+    rendered status line are affected.
+  auto_title_instructions: >
+    Use Conventional Commits. Common scopes for this repo:
+    feat(usage), feat(git), feat(mcp), feat(renderer),
+    fix(<adapter>), refactor(<package>), chore(devcontainer), ci(release),
+    docs(vision|architecture|workflows).
+  labeling_instructions:
+    - label: dependencies
+      instructions: PR touches go.mod, go.sum, or Makefile dep targets.
+    - label: breaking-change
+      instructions: PR changes the public CLI interface, stdin schema, stdout layout, or a port signature.
+    - label: security
+      instructions: PR touches credentials, OAuth, secrets handling, supply-chain.
+    - label: concurrency
+      instructions: PR adds/removes goroutines, channels, sync primitives, or context propagation.
+    - label: performance
+      instructions: PR affects the hot path (StatusLineService.Render or any port called per-tick).
+    - label: shell
+      instructions: PR modifies .sh files or shell-embedded snippets.
+    - label: correctness
+      instructions: PR changes invariants, error handling, or state-machine logic.
+    - label: renderer
+      instructions: PR touches internal/presentation/renderer (ANSI output).
+    - label: adapter
+      instructions: PR adds or modifies an internal/adapter package.
+    - label: domain
+      instructions: PR changes internal/domain/{model,port}.
+  auto_apply_labels: true
+
+  # Path filters: do NOT review template-managed and vendored content.
+  path_filters:
+    - "!.devcontainer/**"
+    - "!.github/**"
+    - "!vendor/**"
+    - "!**/*.lock"
+    - "!**/*.sum"
+    - "!bin/**"
+    - "!.claude/**"
+
+  path_instructions:
+    - path: "cmd/**/*.go"
+      instructions: >
+        Entry-point glue. Verify: stdin parsing tolerates malformed JSON
+        (exit 0, never panic), all adapter wiring uses port interfaces
+        (no concrete adapter types), exit code is always 0 even on
+        adapter errors.
+    - path: "internal/domain/**/*.go"
+      instructions: >
+        Pure domain — no I/O, no goroutines, no time.Sleep, no logging.
+        Value types only. Port interfaces stay minimal: one method per
+        external concern when possible.
+    - path: "internal/application/**/*.go"
+      instructions: >
+        Orchestration only. Each port call must be tolerant of error
+        (segment skipped, not propagated). Parallel fan-out should use
+        context with a deadline matching the latency budget (~50 ms p95).
+    - path: "internal/adapter/**/*.go"
+      instructions: >
+        Adapter must implement exactly one port from internal/domain/port.
+        No domain logic here. Subprocess calls (git, task) must time out.
+        Network calls (Anthropic) must be cached on disk and refresh
+        out-of-band — never blocking on the hot path.
+    - path: "internal/presentation/renderer/**/*.go"
+      instructions: >
+        Pure rendering — input is the assembled domain model, output is
+        an ANSI string. Verify segment collapsing rules respond to
+        TerminalInfo.Width. No I/O here.
+    - path: "**/*_test.go"
+      instructions: >
+        Convention: same package for white-box (`_internal_test.go`),
+        package suffix `_test` for black-box (`_external_test.go`).
+        Table-driven preferred for dispatch logic.
+    - path: "**/*.md"
+      instructions: >
+        Documentation accuracy — verify referenced paths/files exist and
+        match the code.
+    - path: "Makefile"
+      instructions: >
+        Targets must remain: build, test, lint, fmt, demo, run, clean.
+        New targets are fine; renaming/removing standard ones is breaking.
+
+  auto_review:
+    # Sync PRs opened by kodflow-ci[bot] (post-commit enforce, runner-template) are
+    # excluded from review to save the CodeRabbit quota; the same lists live in
+    # kodflow/making.codes coderabbit/override-*.yaml.
+    ignore_usernames:
+      - "kodflow-ci[bot]"
+    enabled: false
+    drafts: false
+    base_branches: ["main"]
+    # Label-triggered: add the `coderabbit` label on a PR to request review.
+    labels: ["coderabbit"]
+    ignore_title_keywords:
+      - "ci(post-commit): sync the gate workflow with the central stub"
+      - "ci(runner-template): sync the stubs with kodflow/post-commit"
+      - "ci: add the mandatory post-commit gate"
+      - "ci: run every job on the self-hosted kodflow-runner"
+
+  finishing_touches:
+    docstrings:
+      enabled: true
+    unit_tests:
+      enabled: true
+
+  pre_merge_checks:
+    title:
+      mode: warning
+    description:
+      mode: warning
+    issue_assessment:
+      mode: warning
+    docstrings:
+      mode: warning
+    custom_checks: []
+
+  tools:
+    ast-grep:
+      essential_rules: true
+      rule_dirs: []
+      packages: []
+    shellcheck:
+      enabled: true
+    yamllint:
+      enabled: true
+    actionlint:
+      enabled: true
+    markdownlint:
+      enabled: true
+    languagetool:
+      enabled: false  # noisy on technical prose
+    hadolint:
+      enabled: true
+    biome:
+      enabled: false
+    gitleaks:
+      enabled: true
+    semgrep:
+      enabled: true
+    checkov:
+      enabled: false
+    detekt:
+      enabled: false
+    eslint:
+      enabled: false
+    rubocop:
+      enabled: false
+    pylint:
+      enabled: false
+    ruff:
+      enabled: false
+    swiftlint:
+      enabled: false
+    phpstan:
+      enabled: false
+    pmd:
+      enabled: false
+
+chat:
+  art: false
+  auto_reply: true
+
+knowledge_base:
+  code_guidelines:
+    filePatterns:
+      - "**/*.go"
+      - "**/*.md"
+      - "**/*.yml"
+      - "**/*.yaml"
+      - "**/*.sh"
+      - "Makefile"
+
+code_generation:
+  docstrings:
+    path_instructions:
+      - path: "internal/**/*.go"
+        instructions: >
+          GoDoc style. First sentence ≤ 80 chars. Document exported
+          identifiers; unexported only when behaviour is non-obvious.
+  unit_tests:
+    path_instructions:
+      - path: "internal/**/*.go"
+        instructions: >
+          Table-driven, same-package white-box for unexported helpers,
+          `_test` package for public API. Use `t.Parallel()` where safe.
+
+issue_enrichment:
+  planning:
+    enabled: true
+  labeling:
+    auto_apply_labels: true
+    labeling_instructions:
+      - label: bug
+        instructions: Issue describes incorrect behaviour vs documented intent.
+      - label: enhancement
+        instructions: Issue requests new capability.
+      - label: rate-limit
+        instructions: Issue mentions Anthropic 5h or weekly burn-rate.
+      - label: hot-path
+        instructions: Issue touches per-render performance.

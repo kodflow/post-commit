@@ -1,0 +1,7 @@
+# Managed on top of central.yaml for the repositories of kitsunium only, with
+# the same rules: a repository cannot change these keys.
+reviews:
+  auto_approvals:
+    # A CodeRabbit approval must never count as the author approving their own
+    # pull request on kitsunium.
+    allow_author_approval: false

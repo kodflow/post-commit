@@ -3,3 +3,7 @@
 
 __pycache__/
 *.py[cod]
+
+# scripts/coderabbit_metrics.py writes its reports here: they name private
+# repositories and never belong in this public repository.
+build/
