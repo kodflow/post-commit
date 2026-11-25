@@ -8,6 +8,7 @@ import argparse
 import copy
 import json
 import os
+import sys
 from pathlib import Path
 
 from flow_api import APIError, GitHub, reconcile_rules, repository_name
@@ -50,6 +51,30 @@ def optional_file(api, repo, path, ref="main"):
         raise
 
 
+def managed_coderabbit(repo, local, deployed, legacy, qodo):
+    """Render the same files that the central CodeRabbit reconciler expects."""
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+    from coderabbit import Central, GENERATED, Refused
+
+    if legacy is not None:
+        raise ValueError("migrate .coderabbit.yml with central enforcement before enrolling in flow")
+    try:
+        central = Central(str(Path(__file__).resolve().parents[1] / "stub/coderabbit"), repo.split("/")[0])
+        source = local
+        if source is None:
+            if deployed is not None and GENERATED not in deployed.splitlines()[:3]:
+                source = deployed
+            else:
+                source, _ = central.render(None)
+        local, qodo = configure_reviewers(source, qodo)
+        rendered, data = central.render(local)
+    except Refused as error:
+        raise ValueError(str(error)) from error
+    if data["reviews"]["auto_review"]["enabled"] is not False:
+        raise ValueError("central CodeRabbit configuration enables automatic review")
+    return local, rendered, qodo
+
+
 def migration_files(api, repo, default_policy, spec):
     repository_name(repo)
     source_path = spec["workflow"]
@@ -77,10 +102,12 @@ def migration_files(api, repo, default_policy, spec):
     combined_spec = copy.deepcopy(spec)
     combined_spec["lanes"]["heavy"] += added
     full, advisory = migrate_workflow(combined, combined_spec)
-    cr, qodo = configure_reviewers(optional_file(api, repo, ".coderabbit.yaml"),
+    cr_local, cr, qodo = managed_coderabbit(repo, optional_file(api, repo, ".coderabbit.local.yaml"),
+                                   optional_file(api, repo, ".coderabbit.yaml"),
+                                   optional_file(api, repo, ".coderabbit.yml"),
                                    optional_file(api, repo, ".pr_agent.toml"))
     files = {**included_files, backup: source, source_path: full, ".github/workflows/flow-advisory.yml": advisory,
-             ".coderabbit.yaml": cr, ".pr_agent.toml": qodo}
+             ".coderabbit.local.yaml": cr_local, ".coderabbit.yaml": cr, ".pr_agent.toml": qodo}
     if spec.get("graph_validator"):
         validator = spec["graph_validator"]
         path = validator["path"]

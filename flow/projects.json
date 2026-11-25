@@ -66,7 +66,7 @@
   "projects": {
     "kodflow/post-commit": {
       "workflow": ".github/workflows/ci.yml",
-      "source_sha": "1083d784f24aed9e4379b39592177228e11ab543",
+      "source_sha": "f48a16a3488484bd2a22fd72323a71b172a07a4d",
       "advisory_jobs": [
         "test",
         "post-commit"
@@ -85,7 +85,7 @@
     },
     "kodflow/ktn-linter": {
       "workflow": ".github/workflows/ci.yml",
-      "source_sha": "70c93bb179a0a49512d9cd14c35773addb4712a5",
+      "source_sha": "cd937e483046debae3e5a7ab1e1dca61907a5793",
       "advisory_jobs": [
         "bazel-test",
         "security",
@@ -113,16 +113,17 @@
           "licence-origins",
           "macos-license",
           "windows-license",
-          "native"
+          "native",
+          "multiuser"
         ]
       }
     },
     "supervizio/agent": {
       "workflow": ".github/workflows/ci.yml",
-      "source_sha": "01d59f16b45f3e9c9604af4920c8f1cc2c2a7978",
+      "source_sha": "c3d9ba088f6f369c70c5600068e566bcab95f6fd",
       "graph_validator": {
         "path": ".github/scripts/ci_changes.py",
-        "source_sha": "f2c73a27616803d240df3a4c0194d32f834e5b32"
+        "source_sha": "c1567137480b3fce74c08f5bdc24a9e6979058c4"
       },
       "external_e2e": {
         "job_id": "dispatch-e2e",
@@ -165,7 +166,7 @@
     },
     "supervizio/libprobe": {
       "workflow": ".github/workflows/ci.yml",
-      "source_sha": "0e08d4f622363c357e00bc903c88c8bb99d8ad85",
+      "source_sha": "9d330a3192f903cafb4e37b627bb4dc482b4e93a",
       "advisory_jobs": [
         "lint",
         "test"
@@ -185,11 +186,12 @@
         "heavy": [
           "summary"
         ]
-      }
+      },
+      "preserve_push": true
     },
     "kitsunium/sdk": {
       "workflow": ".github/workflows/bazel-ci.yml",
-      "source_sha": "e699f42e70f11cb6eb91c71c8d79fc7e65c7c96b",
+      "source_sha": "2499d6ad0cafa70413b867e9d1d04fbb5bef96b5",
       "preserve_push": true,
       "advisory_jobs": [
         "bazel",
@@ -206,14 +208,19 @@
           "bazel"
         ],
         "heavy": [
-          "cross-build",
-          "test-386",
-          "docs-site"
+          "scope-summary"
         ]
       },
       "include_workflows": {
-        ".github/workflows/e2e-cross.yml": "ea2465c6f500962aca1e3e4805ee7ac8bd92cbc0"
-      }
+        ".github/workflows/e2e-cross.yml": "4cbcc555a8778a48c2c421f92fc5083fc89b847b"
+      },
+      "advisory_allowed_dependencies": [
+        "bazel",
+        "lint-ktn",
+        "shell-gates",
+        "models",
+        "scope"
+      ]
     }
   }
 }
