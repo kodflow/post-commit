@@ -353,7 +353,7 @@ repository:
      (nobody can post a look-alike status with a PAT);
    - no branch deletion, no non-fast-forward push — the force-push
      protection the local hook used to provide, now server-side;
-   - bypass: repository admins only, always.
+   - no bypass actors: an exceptional rewrite requires a deliberate ruleset edit.
 
 Because a required status that is never reported blocks the merge,
 **deleting or renaming the stub blocks every PR** — the gate cannot be
@@ -526,7 +526,7 @@ and merge that here. The next enforce run opens the sync on every owner.
   the repository public). One comment per pull request, rewritten in place.
   The same comment on a repository that *does* carry the ruleset says so
   instead — the reader never has to guess whether the red status has teeth.
-- A **repository admin** bypasses the ruleset. That is intended.
+- An exceptional rewrite requires a deliberate ruleset edit.
 - The gate sees commits after they exist. A direct push to the trunk without
   a passing `post-commit` status is rejected by the ruleset — but the commit
   was made, locally, by someone who then has to fix it.
@@ -756,3 +756,12 @@ Edit `scripts/patterns.txt` for a rule about what a commit *says*, or
 `scripts/agent-paths.txt` for one about what it *tracks*. Add a case to
 `tests/run.sh`, open a PR — this repo gates itself with the version under
 review. Once on `main`, the rule is live everywhere on the next run.
+
+## Integration on develop, qualification on main
+
+The optional fleet flow separates permissive integration from complete release
+qualification. Lint/unit failures are visible but do not block develop; main
+promotions require lint/unit, heavy tests and current Qodo/CodeRabbit evidence.
+A soft/hard review budget reserves room for corrections and a central App
+controller serializes merges without requiring a rebase. See [flow/README.md](flow/README.md)
+for rules, project profiles, dry-run/apply commands and rollout limitations.
