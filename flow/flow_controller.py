@@ -52,8 +52,11 @@ def checkout_objects(path, repo, number, token):
         env.update({"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "http.https://github.com/.extraheader",
                     "GIT_CONFIG_VALUE_0": "AUTHORIZATION: basic " + encoded})
     def git(*args):
-        process = subprocess.run(["git", "-c", "core.hooksPath=/dev/null", "-C", str(path), *args],
-                                 env=env, capture_output=True, timeout=300, check=False)
+        try:
+            process = subprocess.run(["git", "-c", "core.hooksPath=/dev/null", "-C", str(path), *args],
+                                     env=env, capture_output=True, timeout=300, check=False)
+        except subprocess.TimeoutExpired as error:
+            raise GitError("candidate object fetch timed out") from error
         if process.returncode:
             raise GitError("could not fetch candidate objects")
     git("init", "--bare", "-q")
@@ -103,12 +106,15 @@ def validation_receipt(api, repo, pr, policy):
     if len(artifacts) != 1 or artifacts[0].get("size_in_bytes", 0) > 65536:
         return {}, "candidate-receipt-missing"
     raw = api.request("GET", f"repos/{repo}/actions/artifacts/{artifacts[0]['id']}/zip", raw=True)
-    if len(raw) > 65536:
-        raise ValueError("oversized candidate receipt")
-    with zipfile.ZipFile(io.BytesIO(raw)) as archive:
-        if archive.namelist() != ["flow-candidate.json"] or archive.infolist()[0].file_size > 4096:
-            raise ValueError("invalid candidate receipt archive")
-        receipt = json.loads(archive.read("flow-candidate.json"))
+    try:
+        if len(raw) > 65536:
+            raise ValueError("oversized candidate receipt")
+        with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+            if archive.namelist() != ["flow-candidate.json"] or archive.infolist()[0].file_size > 4096:
+                raise ValueError("invalid candidate receipt archive")
+            receipt = json.loads(archive.read("flow-candidate.json"))
+    except (ValueError, zipfile.BadZipFile, RuntimeError, NotImplementedError):
+        return {}, "candidate-receipt-invalid"
     expected = {"version": 1, "pr": pr["number"], "head": pr["head"]["sha"],
                 "base": pr["base"]["sha"], "merge": pr["merge_commit_sha"],
                 "run_id": run["id"], "attempt": attempt}
@@ -249,6 +255,8 @@ class Controller:
                 _, actual = contents(self.api, self.repo, path, head)
             except APIError:
                 return context, Verdict(False, "managed-policy-file-missing", (path,)), None
+            except (ValueError, TypeError, KeyError):
+                return context, Verdict(False, "managed-policy-file-invalid", (path,)), None
             if actual != expected and not maintenance:
                 return context, Verdict(False, "managed-policy-file-changed", (path,)), None
         with tempfile.TemporaryDirectory(prefix="flow-candidate-") as directory:

@@ -11,7 +11,7 @@ def candidate_job():
         "steps": [
             {"uses": "actions/checkout@" + CHECKOUT_SHA,
              "with": {"ref": "${{ github.sha }}", "persist-credentials": False}},
-            {"name": "Record the exact validated candidate", "env": {
+            {"name": "Record the exact validated candidate", "shell": "bash", "working-directory": ".", "env": {
                 "FLOW_PR": "${{ github.event.pull_request.number || 0 }}",
                 "FLOW_BASE": "${{ github.event.pull_request.base.sha || github.sha }}",
                 "FLOW_HEAD": "${{ github.event.pull_request.head.sha || github.sha }}",

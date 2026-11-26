@@ -68,9 +68,10 @@ def authorized_label(api, repository, pr, name, *, admin_only=False):
     return False
 
 
-def reconcile_rules(api, endpoint, desired, *, apply=False):
+def reconcile_rules(api, endpoint, desired, *, apply=False, local_only=False):
     """Update only controller-owned names, never inherited or unrelated rules."""
-    existing = api.pages(endpoint)
+    existing = (api.pages(endpoint, parameters={"includes_parents": "false"})
+                if local_only else api.pages(endpoint))
     changes = []
     for wanted in desired:
         matches = [r for r in existing if r["name"] == wanted["name"]]

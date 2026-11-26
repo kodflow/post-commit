@@ -54,7 +54,9 @@ def combine_workflows(primary_text, included):
         def rewrite(value):
             if isinstance(value, str):
                 for old, new in mapping.items():
-                    value = re.sub(r"\bneeds\." + re.escape(old) + r"\b", "needs." + new, value)
+                    value = re.sub(r"\bneeds\." + re.escape(old) + r"(?![\w-])", "needs." + new, value)
+                    value = re.sub(r"""\bneeds\[\s*(['"])""" + re.escape(old) + r"\1\s*\]",
+                                   lambda match: f"needs[{match[1]}{new}{match[1]}]", value)
                 return value
             if isinstance(value, dict):
                 return {key: rewrite(item) for key, item in value.items()}
@@ -153,10 +155,27 @@ def migrate_workflow(text, spec):
             "name": "ci-" + lane, "runs-on": "ubuntu-latest", "timeout-minutes": 5,
             "if": "${{ always() && github.event_name == 'pull_request' }}",
             "needs": list(dict.fromkeys(needed)), "permissions": {},
-            "steps": [{"name": "Require every selected job to succeed", "env": {
+            "steps": [{"name": "Require every selected job to succeed", "shell": "bash", "working-directory": ".", "env": {
                 "RESULTS": "${{ toJSON(needs) }}",
             }, "run": "python3 - <<'PY'\nimport json, os\nr = json.loads(os.environ['RESULTS'])\nif not r or any(v['result'] != 'success' for v in r.values()):\n    raise SystemExit('Required validation missing, skipped, cancelled or failed')\nPY\n"}],
         }
+    if spec.get("external_e2e"):
+        dispatch_id = spec["external_e2e"]["job_id"]
+        heavy = full["jobs"]["ci-heavy"]
+        heavy["needs"] = list(dict.fromkeys([*heavy["needs"], "changes", dispatch_id]))
+        heavy["steps"][0]["env"].update({
+            "DISPATCH_JOB": dispatch_id,
+            "EXPECT_E2E": "${{ needs.changes.outputs.e2e }}",
+        })
+        heavy["steps"][0]["run"] = (
+            "python3 - <<'PY'\nimport json, os\nr = json.loads(os.environ['RESULTS'])\n"
+            "dispatch = r.pop(os.environ['DISPATCH_JOB'], {}).get('result')\n"
+            "expected = os.environ['EXPECT_E2E']\n"
+            "if expected not in ('true', 'false') or dispatch != {'true': 'success', 'false': 'skipped'}[expected]:\n"
+            "    raise SystemExit('Dispatch does not match the authored E2E decision')\n"
+            "if not r or any(v['result'] != 'success' for v in r.values()):\n"
+            "    raise SystemExit('Required validation missing, skipped, cancelled or failed')\nPY\n"
+        )
     # Lint/unit are mandatory on the integrated promotion even when legacy
     # path detection would have skipped them. Existing dependency failures
     # still prevent execution through the normal needs semantics.
@@ -230,15 +249,22 @@ def configure_reviewers(coderabbit_text, qodo_text):
         sources.append("^(?!develop$).*")
     # Preserve prompts and unrelated settings, refusing ambiguous multiline edits.
     lines = (qodo_text or "").splitlines()
+    def outside_multiline(index):
+        try:
+            tomllib.loads("\n".join(lines[:index]))
+        except tomllib.TOMLDecodeError:
+            return False
+        return True
+
     def assign(section, key, value):
         nonlocal lines
-        start = next((i for i, line in enumerate(lines) if re.match(r"^\s*\[" + re.escape(section) + r"\]\s*(?:#.*)?$", line)), None)
+        start = next((i for i, line in enumerate(lines) if re.match(r"^\s*\[" + re.escape(section) + r"\]\s*(?:#.*)?$", line) and outside_multiline(i)), None)
         assignment = key + " = " + json.dumps(value)
         if start is None:
             lines += ["", "[" + section + "]", assignment]
         else:
-            end = next((i for i in range(start + 1, len(lines)) if re.match(r"^\s*\[[A-Za-z0-9_.-]+\]\s*(?:#.*)?$", lines[i])), len(lines))
-            matches = [i for i in range(start + 1, end) if re.match(r"\s*" + re.escape(key) + r"\s*=", lines[i])]
+            end = next((i for i in range(start + 1, len(lines)) if re.match(r"^\s*\[[A-Za-z0-9_.-]+\]\s*(?:#.*)?$", lines[i]) and outside_multiline(i)), len(lines))
+            matches = [i for i in range(start + 1, end) if re.match(r"\s*" + re.escape(key) + r"\s*=", lines[i]) and outside_multiline(i)]
             if matches:
                 index = matches[0]
                 for stop in range(index + 1, end + 1):

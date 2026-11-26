@@ -526,7 +526,7 @@ and merge that here. The next enforce run opens the sync on every owner.
   the repository public). One comment per pull request, rewritten in place.
   The same comment on a repository that *does* carry the ruleset says so
   instead — the reader never has to guess whether the red status has teeth.
-- A **repository admin** bypasses the ruleset. That is intended.
+- An exceptional rewrite requires a deliberate ruleset edit.
 - The gate sees commits after they exist. A direct push to the trunk without
   a passing `post-commit` status is rejected by the ruleset — but the commit
   was made, locally, by someone who then has to fix it.

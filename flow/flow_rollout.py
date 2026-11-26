@@ -227,6 +227,13 @@ def protect(api, repo, policy, *, apply=False):
                     detail = api.request("GET", endpoint + f"/{item['id']}")
                     included.update(detail.get("conditions", {}).get("repository_name", {}).get("include", []))
             plan = reconcile_rules(api, endpoint, rulesets(policy, sorted(included)), apply=apply)
+            # Existing local rules still apply alongside the organization rules.
+            # Align their actors and checks after the organization rules exist.
+            repo_endpoint = f"repos/{repo}/rulesets"
+            local = {item["name"] for item in api.pages(repo_endpoint, parameters={"includes_parents": "false"})}
+            duplicates = [rule for rule in desired if rule["name"] in local]
+            if duplicates:
+                plan += reconcile_rules(api, repo_endpoint, duplicates, apply=apply, local_only=True)
             return {"scope": "organization", "changes": plan}
         except APIError as error:
             if error.status not in {403, 404}:

@@ -20,6 +20,13 @@ def listed_paths(body, expected):
     return set(expected) <= quoted
 
 
+def current_qodo_section(body):
+    return re.split(
+        r"(?im)(?:<summary>[^<]*(?:previous reviews|audit trail)|^\s*#{1,6}\s+previous reviews\b)",
+        body, maxsplit=1,
+    )[0]
+
+
 def evidence(provider, *, head, base, anchor_time, expected_paths, reviews, comments, statuses, unresolved):
     if unresolved:
         return Review(head, base, False, False, len(unresolved), "unresolved-findings")
@@ -34,10 +41,10 @@ def evidence(provider, *, head, base, anchor_time, expected_paths, reviews, comm
     # summary without that head binding must not stand in for a review.
     if provider == "qodo":
         for item in comments:
-            body = item.get("body", "")
+            body = current_qodo_section(item.get("body", ""))
             identity = re.search(r"(?is)review updated until commit.{0,500}", body)
             if (item.get("user", {}).get("login") in authors and identity
-                    and head in identity[0] and item.get("updated_at")
+                    and re.search(r"(?<![0-9a-f])" + re.escape(head) + r"(?![0-9a-f])", identity[0]) and item.get("updated_at")
                     and timestamp(item["updated_at"]) >= cutoff):
                 candidates.append((timestamp(item["updated_at"]), body, "COMMENTED"))
     if not candidates:
@@ -56,12 +63,11 @@ def evidence(provider, *, head, base, anchor_time, expected_paths, reviews, comm
         selection = re.search(r"(?is)<summary>[^<]*Files selected for processing:\s*([0-9]+)</summary>(.*?)</details>", body)
         if not findings or not selection:
             return Review(head, base, False, False, 0, "unknown-review-format")
-        covered = listed_paths(selection[2], expected_paths)
         # A selected-file count that disagrees with its list is not complete.
-        selected = set(re.findall(r"\* `([^`\n]+)`", selection[2]))
-        covered = covered and int(selection[1]) == len(selected)
+        selected = set(re.findall(r"(?m)^\s*[-*] `([^`\n]+)`\s*$", selection[2]))
+        covered = set(expected_paths) <= selected and int(selection[1]) == len(selected)
         return Review(head, base, True, covered, int(findings[1]))
-    current = re.split(r"(?i)(?:<summary>[^<]*(?:previous reviews|audit trail)|^#+\s*previous reviews)", body, maxsplit=1)[0]
+    current = current_qodo_section(body)
     no_findings = re.search(r"(?im)^\s*[*_✅ ]*no (?:issues|findings|problems) (?:were )?(?:found|detected|identified)[*_!. ]*\s*$", current)
     if not no_findings:
         return Review(head, base, False, False, 0, "findings-not-cleared")

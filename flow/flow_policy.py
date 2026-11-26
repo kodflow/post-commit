@@ -40,7 +40,9 @@ def validate_policy(policy):
         excludes = reviewer["exclude"]
         if not isinstance(excludes, list) or any(not isinstance(p, str) or not p for p in excludes):
             raise ValueError(f"{name}: excludes must be a list of glob patterns")
-        if any(p in ("*", "**", "**/*") for p in excludes):
+        if any(all(part and set(part) == {"*"} for part in p.lstrip("/").split("/"))
+               and sum(part != "**" for part in p.lstrip("/").split("/")) <= 1
+               for p in excludes):
             raise ValueError(f"{name}: excluding the entire repository is forbidden")
     checks = policy.get("promotion_checks")
     if (not isinstance(checks, list) or not checks

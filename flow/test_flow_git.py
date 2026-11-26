@@ -1,3 +1,4 @@
+import os
 """Budget calculations against real Git objects and merges, never mocked diffs."""
 
 import subprocess
@@ -27,7 +28,8 @@ class GitBudgetTests(unittest.TestCase):
         self.providers = {"qodo": [], "coderabbit": []}
 
     def git(self, *args):
-        return subprocess.run(["git", "-C", str(self.path), *args], check=True,
+        env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+        return subprocess.run(["git", "-C", str(self.path), *args], check=True, env=env,
                               capture_output=True).stdout.decode().strip()
 
     def write(self, name, content):
