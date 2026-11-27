@@ -1,9 +1,13 @@
 name: ci
 'on':
-  push:
+  pull_request:
     branches:
     - main
-  pull_request: null
+    types:
+    - opened
+    - synchronize
+    - reopened
+    - ready_for_review
   workflow_dispatch: null
 permissions:
   contents: read
@@ -12,14 +16,22 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v7
+      with:
+        ref: ${{ github.sha }}
     - name: shellcheck
-      run: |
-        # python3-jsonschema is the schema oracle tests/run.sh requires in
-        # CI: it holds coderabbit.py's built-in validator to the reference
+      run: '# python3-jsonschema is the schema oracle tests/run.sh requires in
+
+        # CI: it holds coderabbit.py''s built-in validator to the reference
+
         # implementation. It is installed here, in a job holding no token,
+
         # and never in the enforce job.
+
         sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck python3-jsonschema
+
         shellcheck -S warning scripts/*.sh tests/*.sh
+
+        '
     - name: behaviour tests
       run: bash tests/run.sh
     - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
@@ -32,13 +44,103 @@ jobs:
     - name: runner-template pin
       run: bash scripts/bump-runner-template.sh --verify
     - name: validate YAML
-      run: "python3 - <<'PY'\nimport yaml, glob\nfor f in ['action.yml', 'block-merge/action.yml', 'stub/post-commit.yml'] + sorted(glob.glob('stub/runner-template/*/*.yml')) + sorted(glob.glob('stub/coderabbit/**/*.yaml', recursive=True)) + sorted(glob.glob('coderabbit/**/*.yaml', recursive=True)) + sorted(glob.glob('.github/workflows/*.yml')):\n    yaml.safe_load(open(f));\n    print('ok', f)\nPY\n"
+      run: "python3 - <<'PY'\nimport yaml, glob\nfor f in ['action.yml', 'block-merge/action.yml', 'stub/post-commit.yml']\
+        \ + sorted(glob.glob('stub/runner-template/*/*.yml')) + sorted(glob.glob('stub/coderabbit/**/*.yaml', recursive=True))\
+        \ + sorted(glob.glob('coderabbit/**/*.yaml', recursive=True)) + sorted(glob.glob('.github/workflows/*.yml')):\n  \
+        \  yaml.safe_load(open(f));\n    print('ok', f)\nPY\n"
     timeout-minutes: 20
+    needs:
+    - flow-candidate
+    if: ${{ (github.event_name != 'pull_request' || (github.head_ref == 'develop' && github.event.pull_request.head.repo.full_name
+      == github.repository)) && (success()) }}
   post-commit:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
     - uses: actions/checkout@v7
+      with:
+        ref: ${{ github.sha }}
     - uses: ./
       with:
         authors: kodflow
+  flow-candidate:
+    name: flow-candidate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+    - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+      with:
+        ref: ${{ github.sha }}
+        persist-credentials: false
+    - name: Record the exact validated candidate
+      shell: bash
+      working-directory: .
+      env:
+        FLOW_PR: ${{ github.event.pull_request.number || 0 }}
+        FLOW_BASE: ${{ github.event.pull_request.base.sha || github.sha }}
+        FLOW_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+      run: "python3 - <<'PY'\nimport json, os, subprocess\nsha = subprocess.check_output(['git','rev-parse','HEAD'], text=True).strip()\n\
+        if sha != os.environ['GITHUB_SHA']:\n    raise SystemExit('Checkout is not the event candidate')\nwith open('flow-candidate.json','w')\
+        \ as f:\n    json.dump(dict(version=1, pr=int(os.environ['FLOW_PR']), base=os.environ['FLOW_BASE'], head=os.environ['FLOW_HEAD'],\
+        \ merge=sha, run_id=int(os.environ['GITHUB_RUN_ID']), attempt=int(os.environ['GITHUB_RUN_ATTEMPT'])), f)\nPY\n"
+    - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+      with:
+        name: flow-candidate-${{ github.run_attempt }}
+        path: flow-candidate.json
+        retention-days: 3
+        if-no-files-found: error
+    if: ${{ (github.event_name != 'pull_request' || (github.head_ref == 'develop' && github.event.pull_request.head.repo.full_name
+      == github.repository)) && (success()) }}
+  ci-lint:
+    name: ci-lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: ${{ (github.event_name != 'pull_request' || (github.head_ref == 'develop' && github.event.pull_request.head.repo.full_name
+      == github.repository)) && (always() && github.event_name == 'pull_request') }}
+    needs:
+    - test
+    permissions: {}
+    steps:
+    - name: Require every selected job to succeed
+      shell: bash
+      working-directory: .
+      env:
+        RESULTS: ${{ toJSON(needs) }}
+      run: "python3 - <<'PY'\nimport json, os\nr = json.loads(os.environ['RESULTS'])\nif not r or any(v['result'] != 'success'\
+        \ for v in r.values()):\n    raise SystemExit('Required validation missing, skipped, cancelled or failed')\nPY\n"
+  ci-unit:
+    name: ci-unit
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: ${{ (github.event_name != 'pull_request' || (github.head_ref == 'develop' && github.event.pull_request.head.repo.full_name
+      == github.repository)) && (always() && github.event_name == 'pull_request') }}
+    needs:
+    - test
+    permissions: {}
+    steps:
+    - name: Require every selected job to succeed
+      shell: bash
+      working-directory: .
+      env:
+        RESULTS: ${{ toJSON(needs) }}
+      run: "python3 - <<'PY'\nimport json, os\nr = json.loads(os.environ['RESULTS'])\nif not r or any(v['result'] != 'success'\
+        \ for v in r.values()):\n    raise SystemExit('Required validation missing, skipped, cancelled or failed')\nPY\n"
+  ci-heavy:
+    name: ci-heavy
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: ${{ (github.event_name != 'pull_request' || (github.head_ref == 'develop' && github.event.pull_request.head.repo.full_name
+      == github.repository)) && (always() && github.event_name == 'pull_request') }}
+    needs:
+    - test
+    permissions: {}
+    steps:
+    - name: Require every selected job to succeed
+      shell: bash
+      working-directory: .
+      env:
+        RESULTS: ${{ toJSON(needs) }}
+      run: "python3 - <<'PY'\nimport json, os\nr = json.loads(os.environ['RESULTS'])\nif not r or any(v['result'] != 'success'\
+        \ for v in r.values()):\n    raise SystemExit('Required validation missing, skipped, cancelled or failed')\nPY\n"

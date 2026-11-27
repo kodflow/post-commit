@@ -1,0 +1,73 @@
+{
+  "check_sources": {
+    "ci-heavy": 15368,
+    "ci-lint": 15368,
+    "ci-unit": 15368
+  },
+  "gate_app_id": 5136597,
+  "gate_bot_login": "kodflow-ci[bot]",
+  "managed_files": {
+    ".coderabbit.local.yaml": "aaeec36b9f4df188f57b0dfc22bd18214a6051bd",
+    ".coderabbit.yaml": "5e9217f45b3315138bc35467203ea17be1c89b56",
+    ".github/flow-source/ci.yml": "0e6e80740571e82e45a98ee5636b14c57c41fbd0",
+    ".github/workflows/ci.yml": "295a28329b497bc5a3d81da0f500c251e603d177",
+    ".github/workflows/flow-advisory.yml": "7e9bf22f4d1577cb6a05cf3a4f3c1816f43d8eb8",
+    ".pr_agent.toml": "b942d19ff1f28d264f9edc5908a0d9cd19d159f1"
+  },
+  "merger_app_id": 5136597,
+  "promotion_checks": [
+    "ci-lint",
+    "ci-unit",
+    "ci-heavy"
+  ],
+  "qualification_workflow": ".github/workflows/ci.yml",
+  "reviewers": {
+    "coderabbit": {
+      "exclude": [
+        "**/*.pb.go",
+        "**/Cargo.lock",
+        "**/MODULE.bazel.lock",
+        "**/go.sum",
+        "Cargo.lock",
+        "MODULE.bazel.lock",
+        "go.sum"
+      ],
+      "hard": {
+        "files": 100,
+        "largest_patch_bytes": 20000,
+        "lines": 2500,
+        "patch_bytes": 80000
+      },
+      "soft": {
+        "files": 80,
+        "largest_patch_bytes": 16000,
+        "lines": 2000,
+        "patch_bytes": 64000
+      }
+    },
+    "qodo": {
+      "exclude": [
+        "**/*.pb.go",
+        "**/Cargo.lock",
+        "**/MODULE.bazel.lock",
+        "**/go.sum",
+        "Cargo.lock",
+        "MODULE.bazel.lock",
+        "go.sum"
+      ],
+      "hard": {
+        "files": 100,
+        "largest_patch_bytes": 20000,
+        "lines": 2500,
+        "patch_bytes": 80000
+      },
+      "soft": {
+        "files": 80,
+        "largest_patch_bytes": 16000,
+        "lines": 2000,
+        "patch_bytes": 64000
+      }
+    }
+  },
+  "version": 1
+}

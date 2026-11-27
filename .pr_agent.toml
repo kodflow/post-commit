@@ -1,0 +1,11 @@
+[config]
+ignore_pr_source_branches = ["^(?!develop$).*"]
+ignore_pr_target_branches = ["^(?!main$).*"]
+
+[github_app]
+handle_push_trigger = false
+push_commands = []
+pr_commands = []
+
+[review_agent]
+enable_incremental_review = false
