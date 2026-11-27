@@ -1,0 +1,16 @@
+inheritance: true
+reviews:
+  auto_review:
+    ignore_usernames:
+    - kodflow-ci[bot]
+    ignore_title_keywords:
+    - 'ci(post-commit): sync the gate workflow with the central stub'
+    - 'ci(runner-template): sync the stubs with kodflow/post-commit'
+    - 'ci: add the mandatory post-commit gate'
+    - 'ci: run every job on the self-hosted kodflow-runner'
+    - 'ci(coderabbit): sync .coderabbit.yaml with the central template'
+    enabled: false
+    drafts: false
+    base_branches: []
+    labels: []
+    auto_incremental_review: false
